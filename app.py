@@ -49,11 +49,10 @@ def _get_doc_metadata(doc, key, default=None):
     """Safely retrieves a key from a document's metadata."""
     return doc.metadata.get(key, default)
 
-# NEW: Custom function to handle PDF loading with robust image extraction
+# Custom function to handle PDF loading with robust image extraction
 def load_pdf_with_images(file_path, temp_dir_path):
     """
-    Manually loads a PDF, extracts text page-by-page, and saves images.
-    Associates extracted images with the correct page's text in the metadata.
+    Manually loads a PDF, extracts text and images, and associates them.
     """
     documents = []
     image_save_dir = os.path.join(temp_dir_path, "images", os.path.splitext(os.path.basename(file_path))[0])
@@ -78,12 +77,16 @@ def load_pdf_with_images(file_path, temp_dir_path):
                 img_file.write(image_bytes)
             image_paths.append(image_path)
             
+        # KEY FIX: Convert the list of image paths to a single string
+        # ChromaDB cannot store lists in metadata. We use a separator.
+        image_paths_str = ";".join(image_paths)
+        
         documents.append(Document(
             page_content=text,
             metadata={
                 'source': os.path.basename(file_path),
                 'page': page_num,
-                'image_paths': image_paths
+                'image_paths': image_paths_str  # Store as a single string
             }
         ))
     return documents
@@ -105,7 +108,6 @@ def configure_retriever(uploaded_files, temp_dir_path):
         try:
             file_extension = os.path.splitext(file.name)[1].lower()
             if file_extension == '.pdf':
-                # Use the new robust PDF loader
                 loaded_docs = load_pdf_with_images(temp_filepath, temp_dir_path)
             elif file_extension == '.docx':
                 loader = Docx2txtLoader(temp_filepath)
@@ -252,8 +254,11 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                 st.markdown(f"**Source:** `{source_info['source']}` | **Page:** `{source_info['page']}`")
                 st.caption(f"Content: *{doc.page_content[:250]}...*")
 
-                if 'image_paths' in doc.metadata:
-                    for img_path in doc.metadata['image_paths']:
+                # KEY FIX: Get the string of paths and split it back into a list
+                image_paths_str = _get_doc_metadata(doc, 'image_paths', '')
+                if image_paths_str:
+                    image_paths_list = image_paths_str.split(';')
+                    for img_path in image_paths_list:
                         if os.path.exists(img_path):
                             st.image(img_path, width=200)
                             image_sources_to_pass.append(img_path)
