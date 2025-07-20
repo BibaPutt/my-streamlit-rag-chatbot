@@ -92,8 +92,8 @@ def configure_retriever(uploaded_files):
     chroma_settings = Settings(anonymized_telemetry=False)
     vectorstore = Chroma.from_documents(doc_chunks, embeddings_model, client_settings=chroma_settings)
 
-    # OPTIMIZATION: Retrieve slightly fewer documents to reduce memory per request
-    return vectorstore.as_retriever(search_kwargs={"k": 4})
+    # OPTIMIZATION: Retrieve fewer documents to reduce API token usage
+    return vectorstore.as_retriever(search_kwargs={"k": 3})
 
 # --- MAIN APP ---
 
@@ -113,10 +113,11 @@ with st.sidebar:
         type=["pdf", "docx", "txt", "html"],
         accept_multiple_files=True
     )
-    # OPTIMIZATION: Add a button to clear chat history and free up memory
     if st.button("Clear Conversation History"):
         st.session_state.langchain_messages = []
         st.rerun()
+    st.markdown("---")
+    st.caption("Note: This app uses a free API tier. If you encounter errors, please wait a minute before trying again.")
 
 
 if not uploaded_files:
@@ -134,8 +135,9 @@ safety_settings = {
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
 }
 
+# --- OPTIMIZATION: Switched to the more rate-limit-friendly Flash model ---
 llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-pro-latest",
+    model="gemini-1.5-flash-latest",
     temperature=0.2,
     streaming=True,
     google_api_key=google_api_key,
@@ -183,8 +185,8 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
         with st.expander("📚 View Sources"):
             for doc in retrieved_docs:
                 source_info = {
-                    "source": os.path.basename(doc.metadata.get('source', 'N/A')),
-                    "page": doc.metadata.get('page', 'N/A') + 1 if isinstance(doc.metadata.get('page'), int) else 'N/A',
+                    "source": os.path.basename(_get_doc_metadata(doc, 'source', 'N/A')),
+                    "page": _get_doc_metadata(doc, 'page', 'N/A') + 1 if isinstance(_get_doc_metadata(doc, 'page'), int) else 'N/A',
                 }
                 st.markdown(f"**Source:** `{source_info['source']}` | **Page:** `{source_info['page']}`")
                 st.caption(f"Content: *{doc.page_content[:250]}...*")
@@ -219,6 +221,8 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
             msgs.add_user_message(user_prompt)
             msgs.add_ai_message(full_response)
         except Exception as e:
-            st.error("An error occurred while generating the response. This might be due to resource limits.")
+            st.error("An error occurred while generating the response. This might be due to API rate limits or other issues.")
             st.error(f"Details: {e}")
 
+def _get_doc_metadata(doc, key, default=None):
+    return doc.metadata.get(key, default)
