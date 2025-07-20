@@ -17,6 +17,8 @@ import pandas as pd
 from PIL import Image
 import fitz  # PyMuPDF
 from langchain_core.documents import Document
+import base64
+from io import BytesIO
 
 # LangChain and AI components
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
@@ -77,8 +79,6 @@ def load_pdf_with_images(file_path, temp_dir_path):
                 img_file.write(image_bytes)
             image_paths.append(image_path)
             
-        # KEY FIX: Convert the list of image paths to a single string
-        # ChromaDB cannot store lists in metadata. We use a separator.
         image_paths_str = ";".join(image_paths)
         
         documents.append(Document(
@@ -86,7 +86,7 @@ def load_pdf_with_images(file_path, temp_dir_path):
             metadata={
                 'source': os.path.basename(file_path),
                 'page': page_num,
-                'image_paths': image_paths_str  # Store as a single string
+                'image_paths': image_paths_str
             }
         ))
     return documents
@@ -254,7 +254,6 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                 st.markdown(f"**Source:** `{source_info['source']}` | **Page:** `{source_info['page']}`")
                 st.caption(f"Content: *{doc.page_content[:250]}...*")
 
-                # KEY FIX: Get the string of paths and split it back into a list
                 image_paths_str = _get_doc_metadata(doc, 'image_paths', '')
                 if image_paths_str:
                     image_paths_list = image_paths_str.split(';')
@@ -272,13 +271,23 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
         if not context_text.strip() and not image_sources_to_pass:
             st.error("Could not extract any relevant content from the documents. Please try a different question.", icon="🤷")
         else:
-            prompt_content = [prompt_content_text]
+            # KEY FIX: Structure the prompt content correctly for LangChain
+            prompt_content = [{"type": "text", "text": prompt_content_text}]
+            
             for img_path in image_sources_to_pass:
                 try:
+                    # Convert image to a base64 data URL
                     img = Image.open(img_path)
-                    prompt_content.append(img)
+                    buffered = BytesIO()
+                    img_format = img.format if img.format else 'JPEG'
+                    img.save(buffered, format=img_format)
+                    img_str = base64.b64encode(buffered.getvalue()).decode()
+                    data_url = f"data:image/{img_format.lower()};base64,{img_str}"
+                    
+                    # Append the correctly formatted image dictionary
+                    prompt_content.append({"type": "image_url", "image_url": {"url": data_url}})
                 except Exception as e:
-                    st.warning(f"Could not load image {img_path}: {e}")
+                    st.warning(f"Could not process image {img_path}: {e}")
 
             multimodal_message = HumanMessage(content=prompt_content)
 
