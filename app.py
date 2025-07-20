@@ -29,13 +29,9 @@ from langchain_core.messages import HumanMessage, AIMessage
 from langchain.storage import InMemoryStore
 from langchain.retrievers.multi_vector import MultiVectorRetriever
 from unstructured.partition.pdf import partition_pdf
-
-# UPDATED: Import Chroma from the new recommended package
 from langchain_chroma import Chroma
 
 # Other libraries
-from chromadb.config import Settings
-# FIXED: Added the missing import for HarmCategory and HarmBlockThreshold
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 # --- UTILITY FUNCTIONS ---
@@ -66,7 +62,10 @@ def configure_multi_vector_retriever(uploaded_files, temp_dir_path, api_key):
     if not uploaded_files:
         return None
 
-    # 1. Partition documents into raw elements (text, tables, images)
+    processing_log = st.empty()
+
+    # 1. Partition documents into raw elements
+    processing_log.info("Step 1/4: Partitioning documents into text, tables, and images...")
     raw_pdf_elements = []
     for file in uploaded_files:
         temp_filepath = os.path.join(temp_dir_path, file.name)
@@ -88,64 +87,63 @@ def configure_multi_vector_retriever(uploaded_files, temp_dir_path, api_key):
         except Exception as e:
             st.error(f"Error partitioning file '{file.name}': {e}", icon="⚠️")
             continue
+    
+    if not raw_pdf_elements:
+        st.warning("Could not partition any documents. Please check the file format.")
+        return None
+    
+    processing_log.info(f"Step 2/4: Found {len(raw_pdf_elements)} elements. Generating summaries and descriptions...")
 
-    texts = []
-    tables = []
-    images = []
-    for element in raw_pdf_elements:
-        if 'unstructured.documents.elements.Table' in str(type(element)):
-            tables.append(str(element))
-        elif 'unstructured.documents.elements.CompositeElement' in str(type(element)):
-            texts.append(str(element))
-        elif 'unstructured.documents.elements.Image' in str(type(element)):
-            # Ensure the image path from metadata is valid
-            img_path = element.metadata.image_path
-            if img_path and os.path.exists(img_path):
-                images.append(img_path)
-
+    # 2. Create summaries and associate with original elements
     summary_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", google_api_key=api_key, temperature=0)
     image_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", google_api_key=api_key, temperature=0)
 
-    # Generate summaries
-    text_summaries = summary_llm.batch([
-        "Summarize the following text chunk: \n\n" + text for text in texts
-    ]) if texts else []
-    table_summaries = summary_llm.batch([
-        "Summarize the following table content: \n\n" + table for table in tables
-    ]) if tables else []
+    element_summaries = []
+    element_ids = []
     
-    image_summaries = []
-    for img_path in images:
-        data_url = image_to_base64(img_path)
-        if data_url:
-            msg = image_llm.invoke([
-                HumanMessage(content=[
-                    {"type": "text", "text": "Describe the content and context of this image in detail. What information does it convey?"},
-                    {"type": "image_url", "image_url": {"url": data_url}}
-                ])
-            ])
-            image_summaries.append(msg)
+    for element in raw_pdf_elements:
+        element_id = str(uuid.uuid4())
+        summary = ""
+        
+        if 'unstructured.documents.elements.Table' in str(type(element)):
+            summary = summary_llm.invoke("Summarize the following table content: \n\n" + str(element)).content
+        elif 'unstructured.documents.elements.CompositeElement' in str(type(element)):
+            summary = summary_llm.invoke("Summarize the following text chunk: \n\n" + str(element)).content
+        elif 'unstructured.documents.elements.Image' in str(type(element)):
+            img_path = element.metadata.image_path
+            if img_path and os.path.exists(img_path):
+                data_url = image_to_base64(img_path)
+                if data_url:
+                    desc = image_llm.invoke([
+                        HumanMessage(content=[
+                            {"type": "text", "text": "Describe the content and context of this image in detail."},
+                            {"type": "image_url", "image_url": {"url": data_url}}
+                        ])
+                    ])
+                    summary = desc.content
+        
+        if summary:
+            element_summaries.append(summary)
+            element_ids.append(element_id)
 
-    id_key = "doc_id"
-    doc_ids = [str(uuid.uuid4()) for _ in raw_pdf_elements]
-    
-    summary_texts = [s.content for s in text_summaries]
-    summary_tables = [s.content for s in table_summaries]
-    summary_images = [s.content for s in image_summaries]
+    processing_log.info("Step 3/4: Storing summaries and raw elements...")
 
+    # 3. Store raw elements and create the MultiVectorRetriever
     vectorstore = Chroma(
         collection_name="summaries",
         embedding_function=GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
     )
     docstore = InMemoryStore()
     
-    vectorstore.add_texts(texts=summary_texts + summary_tables + summary_images, ids=doc_ids)
-    docstore.mset(list(zip(doc_ids, raw_pdf_elements)))
+    vectorstore.add_texts(texts=element_summaries, ids=element_ids)
+    docstore.mset(list(zip(element_ids, raw_pdf_elements)))
 
+    processing_log.success("Step 4/4: Retriever is ready! You can now ask questions.")
+    
     retriever = MultiVectorRetriever(
         vectorstore=vectorstore,
         docstore=docstore,
-        id_key=id_key,
+        id_key="doc_id", # This is not used by InMemoryStore but good practice
         search_kwargs={'k': 5}
     )
     return retriever
@@ -171,13 +169,12 @@ with st.sidebar:
         type=["pdf"],
         accept_multiple_files=True
     )
-    if st.button("Clear Conversation & Files"):
+    if st.button("Clear Conversation & Relaunch"):
         st.session_state.langchain_messages = []
         st.cache_resource.clear()
         st.rerun()
     st.markdown("---")
     st.info("This app uses an advanced Multi-Vector RAG pipeline to understand text, tables, and images.", icon="ℹ️")
-
 
 if not uploaded_files:
     st.info("Please upload PDF documents in the sidebar to start.")
@@ -185,6 +182,7 @@ if not uploaded_files:
 
 retriever = configure_multi_vector_retriever(uploaded_files, st.session_state.temp_dir, google_api_key)
 if not retriever:
+    st.warning("Retriever could not be configured. Please check your files and try again.")
     st.stop()
 
 msgs = StreamlitChatMessageHistory(key="langchain_messages")
@@ -246,7 +244,8 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
             st.text(context_text)
             st.markdown("#### Images:")
             for img_path in context_images:
-                st.image(img_path, width=200)
+                if os.path.exists(img_path):
+                    st.image(img_path, width=200)
 
         prompt_content_text = conversational_qa_template.format(
             context=context_text,
