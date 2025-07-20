@@ -138,7 +138,7 @@ def configure_retriever(uploaded_files, temp_dir_path):
         st.warning("No documents were successfully loaded. Please upload supported files.")
         return None
 
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=4000, chunk_overlap=250)
     doc_chunks = text_splitter.split_documents(docs)
 
     api_key = st.secrets.get("GOOGLE_API_KEY")
@@ -150,7 +150,7 @@ def configure_retriever(uploaded_files, temp_dir_path):
     chroma_settings = Settings(anonymized_telemetry=False)
     vectorstore = Chroma.from_documents(doc_chunks, embeddings_model, client_settings=chroma_settings)
 
-    return vectorstore.as_retriever(search_kwargs={"k": 4})
+    return vectorstore.as_retriever(search_kwargs={"k": 10})
 
 # --- MAIN APP ---
 
