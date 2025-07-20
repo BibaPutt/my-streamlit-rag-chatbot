@@ -24,12 +24,19 @@ from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmb
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.chat_message_histories import StreamlitChatMessageHistory
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import Chroma
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain.storage import InMemoryStore
 from langchain.retrievers.multi_vector import MultiVectorRetriever
 from unstructured.partition.pdf import partition_pdf
+
+# UPDATED: Import Chroma from the new recommended package
+from langchain_chroma import Chroma
+
+# Other libraries
+from chromadb.config import Settings
+# FIXED: Added the missing import for HarmCategory and HarmBlockThreshold
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 # --- UTILITY FUNCTIONS ---
 
@@ -66,21 +73,22 @@ def configure_multi_vector_retriever(uploaded_files, temp_dir_path, api_key):
         with open(temp_filepath, "wb") as f:
             f.write(file.getvalue())
         
-        # Use unstructured to partition the PDF
-        # This will extract text, tables, and save images to the output_dir_path
-        elements = partition_pdf(
-            filename=temp_filepath,
-            extract_images_in_pdf=True,
-            infer_table_structure=True,
-            chunking_strategy="by_title",
-            max_characters=4000,
-            new_after_n_chars=3800,
-            combine_text_under_n_chars=2000,
-            image_output_dir_path=temp_dir_path,
-        )
-        raw_pdf_elements.extend(elements)
+        try:
+            elements = partition_pdf(
+                filename=temp_filepath,
+                extract_images_in_pdf=True,
+                infer_table_structure=True,
+                chunking_strategy="by_title",
+                max_characters=4000,
+                new_after_n_chars=3800,
+                combine_text_under_n_chars=2000,
+                image_output_dir_path=temp_dir_path,
+            )
+            raw_pdf_elements.extend(elements)
+        except Exception as e:
+            st.error(f"Error partitioning file '{file.name}': {e}", icon="⚠️")
+            continue
 
-    # 2. Create summaries for text/table elements and descriptions for images
     texts = []
     tables = []
     images = []
@@ -90,7 +98,10 @@ def configure_multi_vector_retriever(uploaded_files, temp_dir_path, api_key):
         elif 'unstructured.documents.elements.CompositeElement' in str(type(element)):
             texts.append(str(element))
         elif 'unstructured.documents.elements.Image' in str(type(element)):
-            images.append(element.metadata.image_path)
+            # Ensure the image path from metadata is valid
+            img_path = element.metadata.image_path
+            if img_path and os.path.exists(img_path):
+                images.append(img_path)
 
     summary_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", google_api_key=api_key, temperature=0)
     image_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", google_api_key=api_key, temperature=0)
@@ -98,12 +109,11 @@ def configure_multi_vector_retriever(uploaded_files, temp_dir_path, api_key):
     # Generate summaries
     text_summaries = summary_llm.batch([
         "Summarize the following text chunk: \n\n" + text for text in texts
-    ])
+    ]) if texts else []
     table_summaries = summary_llm.batch([
         "Summarize the following table content: \n\n" + table for table in tables
-    ])
+    ]) if tables else []
     
-    # Generate image descriptions
     image_summaries = []
     for img_path in images:
         data_url = image_to_base64(img_path)
@@ -116,7 +126,6 @@ def configure_multi_vector_retriever(uploaded_files, temp_dir_path, api_key):
             ])
             image_summaries.append(msg)
 
-    # 3. Store raw elements and create the MultiVectorRetriever
     id_key = "doc_id"
     doc_ids = [str(uuid.uuid4()) for _ in raw_pdf_elements]
     
@@ -124,15 +133,12 @@ def configure_multi_vector_retriever(uploaded_files, temp_dir_path, api_key):
     summary_tables = [s.content for s in table_summaries]
     summary_images = [s.content for s in image_summaries]
 
-    # The vectorstore will store the summaries
     vectorstore = Chroma(
         collection_name="summaries",
         embedding_function=GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
     )
-    # The docstore will store the raw elements
     docstore = InMemoryStore()
     
-    # Add documents to the stores
     vectorstore.add_texts(texts=summary_texts + summary_tables + summary_images, ids=doc_ids)
     docstore.mset(list(zip(doc_ids, raw_pdf_elements)))
 
@@ -160,7 +166,6 @@ if not google_api_key:
 # --- SIDEBAR AND FILE UPLOAD ---
 with st.sidebar:
     st.header("Upload Your Documents")
-    # For this advanced pipeline, we focus on PDF as the primary source
     uploaded_files = st.file_uploader(
         label="Supports PDF files for multimodal analysis.",
         type=["pdf"],
@@ -233,7 +238,6 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
     with st.chat_message("ai"):
         retrieved_elements = retriever.invoke(user_prompt)
         
-        # Separate retrieved elements into text and images
         context_text = "\n\n".join([str(el) for el in retrieved_elements if 'Image' not in str(type(el))])
         context_images = [el.metadata['image_path'] for el in retrieved_elements if 'Image' in str(type(el))]
         
@@ -284,4 +288,3 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
             except Exception as e:
                 st.error("An error occurred while generating the response.", icon="🚨")
                 st.error(f"Details: {e}")
-
