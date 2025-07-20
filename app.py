@@ -2,9 +2,12 @@
 #  FIX FOR SQLITE3 ON STREAMLIT CLOUD
 #  This code snippet must be placed at the top of your app's script.
 # =====================================================================
-__import__('pysqlite3')
-import sys
-sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+try:
+    __import__('pysqlite3')
+    import sys
+    sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+except ImportError:
+    pass
 # =====================================================================
 
 import streamlit as st
@@ -12,13 +15,15 @@ import os
 import tempfile
 import pandas as pd
 from PIL import Image
+import fitz  # PyMuPDF
+from langchain_core.documents import Document
 
 # LangChain and AI components
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.chat_message_histories import StreamlitChatMessageHistory
 from langchain_community.document_loaders import (
-    PyMuPDFLoader, Docx2txtLoader, TextLoader, UnstructuredHTMLLoader,
+    Docx2txtLoader, TextLoader, UnstructuredHTMLLoader,
     UnstructuredPowerPointLoader, CSVLoader
 )
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -44,13 +49,51 @@ def _get_doc_metadata(doc, key, default=None):
     """Safely retrieves a key from a document's metadata."""
     return doc.metadata.get(key, default)
 
+# NEW: Custom function to handle PDF loading with robust image extraction
+def load_pdf_with_images(file_path, temp_dir_path):
+    """
+    Manually loads a PDF, extracts text page-by-page, and saves images.
+    Associates extracted images with the correct page's text in the metadata.
+    """
+    documents = []
+    image_save_dir = os.path.join(temp_dir_path, "images", os.path.splitext(os.path.basename(file_path))[0])
+    os.makedirs(image_save_dir, exist_ok=True)
+    
+    pdf_document = fitz.open(file_path)
+    for page_num in range(len(pdf_document)):
+        page = pdf_document.load_page(page_num)
+        text = page.get_text()
+        image_paths = []
+
+        image_list = page.get_images(full=True)
+        for img_index, img in enumerate(image_list):
+            xref = img[0]
+            base_image = pdf_document.extract_image(xref)
+            image_bytes = base_image["image"]
+            image_ext = base_image["ext"]
+            image_filename = f"page{page_num+1}_img{img_index+1}.{image_ext}"
+            image_path = os.path.join(image_save_dir, image_filename)
+            
+            with open(image_path, "wb") as img_file:
+                img_file.write(image_bytes)
+            image_paths.append(image_path)
+            
+        documents.append(Document(
+            page_content=text,
+            metadata={
+                'source': os.path.basename(file_path),
+                'page': page_num,
+                'image_paths': image_paths
+            }
+        ))
+    return documents
+
 # --- STATE MANAGEMENT AND CACHING ---
 
 @st.cache_resource(ttl="2h")
 def configure_retriever(uploaded_files, temp_dir_path):
     """
     Configures the retriever by loading, splitting, and embedding documents.
-    Uses a persistent temporary directory for file handling.
     """
     docs = []
     
@@ -62,25 +105,27 @@ def configure_retriever(uploaded_files, temp_dir_path):
         try:
             file_extension = os.path.splitext(file.name)[1].lower()
             if file_extension == '.pdf':
-                # For PDFs, extract images and save them in a dedicated subdirectory
-                image_save_path = os.path.join(temp_dir_path, "images", os.path.splitext(file.name)[0])
-                os.makedirs(image_save_path, exist_ok=True)
-                loader = PyMuPDFLoader(temp_filepath, extract_images=True, image_dir=image_save_path)
+                # Use the new robust PDF loader
+                loaded_docs = load_pdf_with_images(temp_filepath, temp_dir_path)
             elif file_extension == '.docx':
                 loader = Docx2txtLoader(temp_filepath)
+                loaded_docs = loader.load()
             elif file_extension == '.txt':
                 loader = TextLoader(temp_filepath)
+                loaded_docs = loader.load()
             elif file_extension == '.html':
                 loader = UnstructuredHTMLLoader(temp_filepath)
+                loaded_docs = loader.load()
             elif file_extension == '.pptx':
                 loader = UnstructuredPowerPointLoader(temp_filepath)
+                loaded_docs = loader.load()
             elif file_extension == '.csv':
                 loader = CSVLoader(temp_filepath)
+                loaded_docs = loader.load()
             else:
                 st.warning(f"Unsupported file type: {file.name}. Skipping.")
                 continue
             
-            loaded_docs = loader.load()
             docs.extend(loaded_docs)
         except Exception as e:
             st.error(f"Error loading file '{file.name}': {e}", icon="⚠️")
@@ -109,7 +154,6 @@ def configure_retriever(uploaded_files, temp_dir_path):
 st.set_page_config(page_title="Multimodal RAG Assistant", page_icon="🧠")
 st.title("🧠 Advanced Multimodal RAG Assistant")
 
-# KEY FIX: Create a persistent temporary directory for the session
 if 'temp_dir' not in st.session_state:
     st.session_state.temp_dir = tempfile.mkdtemp()
 
@@ -128,7 +172,6 @@ with st.sidebar:
     )
     if st.button("Clear Conversation & Files"):
         st.session_state.langchain_messages = []
-        # Also clear the retriever cache to allow for new file uploads
         st.cache_resource.clear()
         st.rerun()
     st.markdown("---")
@@ -140,7 +183,6 @@ if not uploaded_files:
     st.info("Please upload your documents in the sidebar to start chatting.")
     st.stop()
 
-# Pass the persistent temp directory to the retriever function
 retriever = configure_retriever(uploaded_files, st.session_state.temp_dir)
 if not retriever:
     st.stop()
@@ -210,7 +252,6 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                 st.markdown(f"**Source:** `{source_info['source']}` | **Page:** `{source_info['page']}`")
                 st.caption(f"Content: *{doc.page_content[:250]}...*")
 
-                # KEY FIX: Check for images associated with this specific chunk
                 if 'image_paths' in doc.metadata:
                     for img_path in doc.metadata['image_paths']:
                         if os.path.exists(img_path):
