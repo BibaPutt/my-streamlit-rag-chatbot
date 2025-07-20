@@ -1,3 +1,12 @@
+# =====================================================================
+#  FIX FOR SQLITE3 ON STREAMLIT CLOUD
+#  This code snippet must be placed at the top of your app's script.
+# =====================================================================
+__import__('pysqlite3')
+import sys
+sys.modules['sqlite3'] = sys.modules.pop('pysqlite3')
+# =====================================================================
+
 import streamlit as st
 import os
 import tempfile
@@ -51,7 +60,6 @@ def configure_retriever(uploaded_files):
         # Determine the loader based on the file extension
         try:
             if file.name.endswith('.pdf'):
-                # PyMuPDFLoader can extract images, we'll handle them later
                 loader = PyMuPDFLoader(temp_filepath, extract_images=True)
             elif file.name.endswith('.docx'):
                 loader = Docx2txtLoader(temp_filepath)
@@ -65,7 +73,6 @@ def configure_retriever(uploaded_files):
             
             loaded_docs = loader.load()
             
-            # Add image paths to metadata for PDFs
             if file.name.endswith('.pdf'):
                 for doc in loaded_docs:
                     if 'image_paths' in doc.metadata:
@@ -132,14 +139,13 @@ safety_settings = {
 }
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-pro-latest", # Using the more powerful 1.5 Pro model for better multimodal understanding
+    model="gemini-1.5-pro-latest",
     temperature=0.2,
     streaming=True,
     google_api_key=google_api_key,
     safety_settings=safety_settings,
 )
 
-# New, more detailed prompt
 conversational_qa_template = """You are an expert research assistant. Your goal is to provide clear, accurate, and well-formatted answers based on the provided context, which may include text and images.
 
 **Instructions:**
@@ -173,15 +179,12 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
     st.chat_message("user").write(user_prompt)
 
     with st.chat_message("ai"):
-        # 1. Retrieve documents
         retrieved_docs = retriever.invoke(user_prompt)
         
-        # 2. Prepare context (text and images) and display sources
         context_text = format_docs(retrieved_docs)
         image_sources = []
         
         with st.expander("📚 View Sources"):
-            sources_data = []
             for doc in retrieved_docs:
                 source_info = {
                     "source": os.path.basename(doc.metadata.get('source', 'N/A')),
@@ -190,14 +193,12 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                 st.markdown(f"**Source:** `{source_info['source']}` | **Page:** `{source_info['page']}`")
                 st.caption(f"Content: *{doc.page_content[:250]}...*")
 
-                # Display image thumbnails from sources and collect them for the prompt
                 if 'image_paths' in doc.metadata:
                     for img_path in doc.metadata['image_paths']:
                         if os.path.exists(img_path):
                             st.image(img_path, width=200)
                             image_sources.append(img_path)
 
-        # 3. Construct the multimodal prompt message
         prompt_content = [
             conversational_qa_prompt.format(
                 context=context_text,
@@ -205,7 +206,7 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                 question=user_prompt
             )
         ]
-        # Add images to the prompt content
+        
         for img_path in image_sources:
             try:
                 img = Image.open(img_path)
@@ -215,10 +216,8 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
 
         multimodal_message = HumanMessage(content=prompt_content)
 
-        # 4. Stream the response from the LLM
         response_stream = llm.stream([multimodal_message])
         full_response = st.write_stream(response_stream)
 
-        # 5. Add messages to history
         msgs.add_user_message(user_prompt)
         msgs.add_ai_message(full_response)
