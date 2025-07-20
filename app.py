@@ -85,7 +85,7 @@ def configure_retriever(uploaded_files):
             st.error(f"Error loading file {file.name}: {e}")
             continue
 
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=150)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=2500, chunk_overlap=250)
     doc_chunks = text_splitter.split_documents(docs)
 
     api_key = st.secrets.get("GOOGLE_API_KEY")
@@ -97,7 +97,7 @@ def configure_retriever(uploaded_files):
     chroma_settings = Settings(anonymized_telemetry=False)
     vectorstore = Chroma.from_documents(doc_chunks, embeddings_model, client_settings=chroma_settings)
 
-    return vectorstore.as_retriever(search_kwargs={"k": 3})
+    return vectorstore.as_retriever(search_kwargs={"k": 5})
 
 # --- MAIN APP ---
 
