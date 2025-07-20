@@ -37,6 +37,11 @@ def format_chat_history(chat_history):
     """Formats chat history into a string."""
     return "\n".join(f"{msg.type.capitalize()}: {msg.content}" for msg in chat_history)
 
+# MOVED THIS FUNCTION TO THE TOP TO FIX THE NameError
+def _get_doc_metadata(doc, key, default=None):
+    """Safely retrieves a key from a document's metadata."""
+    return doc.metadata.get(key, default)
+
 # --- STATE MANAGEMENT AND CACHING ---
 
 @st.cache_resource(ttl="2h")
@@ -92,7 +97,6 @@ def configure_retriever(uploaded_files):
     chroma_settings = Settings(anonymized_telemetry=False)
     vectorstore = Chroma.from_documents(doc_chunks, embeddings_model, client_settings=chroma_settings)
 
-    # OPTIMIZATION: Retrieve fewer documents to reduce API token usage
     return vectorstore.as_retriever(search_kwargs={"k": 3})
 
 # --- MAIN APP ---
@@ -114,7 +118,8 @@ with st.sidebar:
         accept_multiple_files=True
     )
     if st.button("Clear Conversation History"):
-        st.session_state.langchain_messages = []
+        if "langchain_messages" in st.session_state:
+            st.session_state.langchain_messages = []
         st.rerun()
     st.markdown("---")
     st.caption("Note: This app uses a free API tier. If you encounter errors, please wait a minute before trying again.")
@@ -135,7 +140,6 @@ safety_settings = {
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
 }
 
-# --- OPTIMIZATION: Switched to the more rate-limit-friendly Flash model ---
 llm = ChatGoogleGenerativeAI(
     model="gemini-1.5-flash-latest",
     temperature=0.2,
@@ -223,6 +227,3 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
         except Exception as e:
             st.error("An error occurred while generating the response. This might be due to API rate limits or other issues.")
             st.error(f"Details: {e}")
-
-def _get_doc_metadata(doc, key, default=None):
-    return doc.metadata.get(key, default)
