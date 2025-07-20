@@ -47,23 +47,25 @@ def _get_doc_metadata(doc, key, default=None):
 # --- STATE MANAGEMENT AND CACHING ---
 
 @st.cache_resource(ttl="2h")
-def configure_retriever(uploaded_files):
+def configure_retriever(uploaded_files, temp_dir_path):
     """
     Configures the retriever by loading, splitting, and embedding documents.
-    Now supports PDF, DOCX, TXT, HTML, PPTX, and CSV files.
+    Uses a persistent temporary directory for file handling.
     """
     docs = []
-    temp_dir = tempfile.TemporaryDirectory()
     
     for file in uploaded_files:
-        temp_filepath = os.path.join(temp_dir.name, file.name)
+        temp_filepath = os.path.join(temp_dir_path, file.name)
         with open(temp_filepath, "wb") as f:
             f.write(file.getvalue())
         
         try:
             file_extension = os.path.splitext(file.name)[1].lower()
             if file_extension == '.pdf':
-                loader = PyMuPDFLoader(temp_filepath, extract_images=True)
+                # For PDFs, extract images and save them in a dedicated subdirectory
+                image_save_path = os.path.join(temp_dir_path, "images", os.path.splitext(file.name)[0])
+                os.makedirs(image_save_path, exist_ok=True)
+                loader = PyMuPDFLoader(temp_filepath, extract_images=True, image_dir=image_save_path)
             elif file_extension == '.docx':
                 loader = Docx2txtLoader(temp_filepath)
             elif file_extension == '.txt':
@@ -79,12 +81,6 @@ def configure_retriever(uploaded_files):
                 continue
             
             loaded_docs = loader.load()
-            
-            if file_extension == '.pdf':
-                for doc in loaded_docs:
-                    if 'image_paths' in doc.metadata:
-                        doc.metadata['image_paths'] = [os.path.join(temp_dir.name, p) for p in doc.metadata['image_paths']]
-
             docs.extend(loaded_docs)
         except Exception as e:
             st.error(f"Error loading file '{file.name}': {e}", icon="⚠️")
@@ -106,12 +102,16 @@ def configure_retriever(uploaded_files):
     chroma_settings = Settings(anonymized_telemetry=False)
     vectorstore = Chroma.from_documents(doc_chunks, embeddings_model, client_settings=chroma_settings)
 
-    return vectorstore.as_retriever(search_kwargs={"k": 3})
+    return vectorstore.as_retriever(search_kwargs={"k": 4})
 
 # --- MAIN APP ---
 
 st.set_page_config(page_title="Multimodal RAG Assistant", page_icon="🧠")
 st.title("🧠 Advanced Multimodal RAG Assistant")
+
+# KEY FIX: Create a persistent temporary directory for the session
+if 'temp_dir' not in st.session_state:
+    st.session_state.temp_dir = tempfile.mkdtemp()
 
 google_api_key = st.secrets.get("GOOGLE_API_KEY")
 if not google_api_key:
@@ -126,12 +126,13 @@ with st.sidebar:
         type=["pdf", "docx", "txt", "html", "pptx", "csv"],
         accept_multiple_files=True
     )
-    if st.button("Clear Conversation History"):
-        if "langchain_messages" in st.session_state:
-            st.session_state.langchain_messages = []
+    if st.button("Clear Conversation & Files"):
+        st.session_state.langchain_messages = []
+        # Also clear the retriever cache to allow for new file uploads
+        st.cache_resource.clear()
         st.rerun()
     st.markdown("---")
-    st.info("To use a Google Doc, download it as a PDF or DOCX file first.", icon="ℹ️")
+    st.info("Image extraction is best supported for PDF files.", icon="ℹ️")
     st.caption("Note: This app uses a free API tier. If you encounter errors, please wait a minute before trying again.")
 
 
@@ -139,7 +140,8 @@ if not uploaded_files:
     st.info("Please upload your documents in the sidebar to start chatting.")
     st.stop()
 
-retriever = configure_retriever(uploaded_files)
+# Pass the persistent temp directory to the retriever function
+retriever = configure_retriever(uploaded_files, st.session_state.temp_dir)
 if not retriever:
     st.stop()
 
@@ -165,7 +167,7 @@ conversational_qa_template = """You are an expert research assistant. Your goal 
 
 **Instructions:**
 1.  Analyze the user's question and the provided chat history.
-2.  Carefully examine the context, including any text and images.
+2.  Carefully examine the context, including any text and images. The context provided under 'Context:' is the most relevant information.
 3.  Synthesize the information to construct a comprehensive answer.
 4.  If the context contains relevant data for a table, format your answer as a Markdown table.
 5.  Use lists, bolding, and italics to structure your answer for readability.
@@ -197,22 +199,23 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
         retrieved_docs = retriever.invoke(user_prompt)
         
         context_text = format_docs(retrieved_docs)
-        image_sources = []
+        image_sources_to_pass = []
         
         with st.expander("📚 View Sources"):
             for doc in retrieved_docs:
                 source_info = {
                     "source": os.path.basename(_get_doc_metadata(doc, 'source', 'N/A')),
-                    "page": _get_doc_metadata(doc, 'page', 'N/A') + 1 if isinstance(_get_doc_metadata(doc, 'page'), int) else 'N/A',
+                    "page": _get_doc_metadata(doc, 'page', 0) + 1,
                 }
                 st.markdown(f"**Source:** `{source_info['source']}` | **Page:** `{source_info['page']}`")
                 st.caption(f"Content: *{doc.page_content[:250]}...*")
 
+                # KEY FIX: Check for images associated with this specific chunk
                 if 'image_paths' in doc.metadata:
                     for img_path in doc.metadata['image_paths']:
                         if os.path.exists(img_path):
                             st.image(img_path, width=200)
-                            image_sources.append(img_path)
+                            image_sources_to_pass.append(img_path)
 
         prompt_content_text = conversational_qa_prompt.format(
             context=context_text,
@@ -220,12 +223,11 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
             question=user_prompt
         )
         
-        # Critical Check: Ensure we have content to send
-        if not context_text.strip() and not image_sources:
-            st.error("Could not extract any content from the relevant sources. Please try a different question.", icon="🤷")
+        if not context_text.strip() and not image_sources_to_pass:
+            st.error("Could not extract any relevant content from the documents. Please try a different question.", icon="🤷")
         else:
             prompt_content = [prompt_content_text]
-            for img_path in image_sources:
+            for img_path in image_sources_to_pass:
                 try:
                     img = Image.open(img_path)
                     prompt_content.append(img)
