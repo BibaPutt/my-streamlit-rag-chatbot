@@ -43,12 +43,10 @@ def format_chat_history(chat_history):
 def configure_retriever(uploaded_files):
     """
     Configures the retriever by loading, splitting, and embedding documents.
-    Now supports PDF (with image extraction), DOCX, TXT, and HTML files.
     """
     docs = []
     temp_dir = tempfile.TemporaryDirectory()
     
-    # Create a dedicated image directory
     img_dir = os.path.join(temp_dir.name, "images")
     os.makedirs(img_dir, exist_ok=True)
 
@@ -57,7 +55,6 @@ def configure_retriever(uploaded_files):
         with open(temp_filepath, "wb") as f:
             f.write(file.getvalue())
         
-        # Determine the loader based on the file extension
         try:
             if file.name.endswith('.pdf'):
                 loader = PyMuPDFLoader(temp_filepath, extract_images=True)
@@ -91,18 +88,12 @@ def configure_retriever(uploaded_files):
         st.error("Google API Key not found in Streamlit secrets. Please add it.")
         st.stop()
 
-    embeddings_model = GoogleGenerativeAIEmbeddings(
-        model="models/embedding-001", google_api_key=api_key
-    )
-
+    embeddings_model = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
     chroma_settings = Settings(anonymized_telemetry=False)
-    vectorstore = Chroma.from_documents(
-        doc_chunks,
-        embeddings_model,
-        client_settings=chroma_settings
-    )
+    vectorstore = Chroma.from_documents(doc_chunks, embeddings_model, client_settings=chroma_settings)
 
-    return vectorstore.as_retriever(search_kwargs={"k": 5})
+    # OPTIMIZATION: Retrieve slightly fewer documents to reduce memory per request
+    return vectorstore.as_retriever(search_kwargs={"k": 4})
 
 # --- MAIN APP ---
 
@@ -122,6 +113,11 @@ with st.sidebar:
         type=["pdf", "docx", "txt", "html"],
         accept_multiple_files=True
     )
+    # OPTIMIZATION: Add a button to clear chat history and free up memory
+    if st.button("Clear Conversation History"):
+        st.session_state.langchain_messages = []
+        st.rerun()
+
 
 if not uploaded_files:
     st.info("Please upload your documents in the sidebar to start chatting.")
@@ -216,8 +212,13 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
 
         multimodal_message = HumanMessage(content=prompt_content)
 
-        response_stream = llm.stream([multimodal_message])
-        full_response = st.write_stream(response_stream)
+        try:
+            response_stream = llm.stream([multimodal_message])
+            full_response = st.write_stream(response_stream)
 
-        msgs.add_user_message(user_prompt)
-        msgs.add_ai_message(full_response)
+            msgs.add_user_message(user_prompt)
+            msgs.add_ai_message(full_response)
+        except Exception as e:
+            st.error("An error occurred while generating the response. This might be due to resource limits.")
+            st.error(f"Details: {e}")
+
