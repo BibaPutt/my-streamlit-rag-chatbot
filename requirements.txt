@@ -12,3 +12,4 @@ beautifulsoup4
 lxml
 Pillow
 pysqlite3-binary
+python-pptx
