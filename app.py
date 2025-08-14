@@ -277,28 +277,65 @@ conversational_qa_prompt = ChatPromptTemplate.from_template(conversational_qa_te
 
 # --- MAIN CHAT INTERFACE ---
 
+# Initialize persistent storage for response data
+if 'response_data' not in st.session_state:
+    st.session_state.response_data = {}
+
 # Initialize chat
 if len(msgs.messages) == 0:
     msgs.add_ai_message("Hello! I'm your advanced RAG assistant. How can I help you analyze your documents?")
 
 # Display chat messages in main area
-for msg in msgs.messages:
+for idx, msg in enumerate(msgs.messages):
     with st.chat_message(msg.type):
-        # Parse and display text with inline images
-        if msg.type == "ai" and "[IMAGE:" in msg.content:
-            image_pattern = r'\[IMAGE:\s*(.*?)\]'
-            parts = re.split(image_pattern, msg.content)
+        if msg.type == "ai":
+            # Check if this response has stored data
+            response_key = f"response_{idx}"
+            if response_key in st.session_state.response_data:
+                # Display stored sources for this specific response
+                stored_data = st.session_state.response_data[response_key]
+                with st.expander(f"📚 Sources for this response ({len(stored_data['sources'])} sources, {len(stored_data['images'])} images)"):
+                    for source in stored_data['sources']:
+                        st.markdown(f"**Source:** `{source['source']}` | **Page:** `{source['page']}`")
+                        st.caption(f"Content: *{source['content_preview']}*")
+                    
+                    if stored_data['images']:
+                        st.markdown("**Images:**")
+                        for img_path in stored_data['images']:
+                            if os.path.exists(img_path):
+                                st.image(img_path, width=200, caption=f"From: {os.path.basename(img_path)}")
+                    
+                    # Stats
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("Sources", len(stored_data['sources']))
+                    with col2:
+                        st.metric("Images", len(stored_data['images']))
+                    with col3:
+                        st.metric("Text Length", f"{stored_data['text_length']} chars")
+                    with col4:
+                        st.metric("OCR Used", "Yes" if stored_data['has_ocr'] else "No")
             
-            for i, part in enumerate(parts):
-                if i % 2 == 1:  # This is an image path
-                    image_path = part.strip()
-                    if os.path.exists(image_path):
-                        st.image(image_path, width=300)
-                    else:
-                        st.warning(f"Referenced image not found: {os.path.basename(image_path)}")
-                else:  # This is text
-                    if part.strip():
-                        st.markdown(part)
+            # Parse and display text with inline images (but only for current response images)
+            if "[IMAGE:" in msg.content:
+                image_pattern = r'\[IMAGE:\s*(.*?)\]'
+                parts = re.split(image_pattern, msg.content)
+                
+                for i, part in enumerate(parts):
+                    if i % 2 == 1:  # This is an image path
+                        image_path = part.strip()
+                        # Only show if image exists and belongs to this response
+                        if (os.path.exists(image_path) and 
+                            response_key in st.session_state.response_data and 
+                            image_path in st.session_state.response_data[response_key]['images']):
+                            st.image(image_path, width=400, caption=f"Referenced: {os.path.basename(image_path)}")
+                        else:
+                            st.warning(f"Referenced image not available: {os.path.basename(image_path)}")
+                    else:  # This is text
+                        if part.strip():
+                            st.markdown(part)
+            else:
+                st.write(msg.content)
         else:
             st.write(msg.content)
 
@@ -310,43 +347,62 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
         retrieved_docs = retriever.invoke(user_prompt)
         
         context_text = format_docs(retrieved_docs)
-        image_sources_to_pass = []
+        current_response_images = []  # Only for this specific response
         all_image_paths = []
+        current_sources = []
         
-        # Show sources for this specific response
-        with st.expander("📚 Sources for this response"):
-            current_images = []
-            current_sources = []
-            
-            for doc in retrieved_docs:
-                source_info = {
-                    "source": os.path.basename(_get_doc_metadata(doc, 'source', 'N/A')),
-                    "page": _get_doc_metadata(doc, 'page', 0) + 1,
-                }
-                current_sources.append(source_info)
-                st.markdown(f"**Source:** `{source_info['source']}` | **Page:** `{source_info['page']}`")
-                st.caption(f"Content: *{doc.page_content[:250]}...*")
+        # Process retrieved documents for current response only
+        for doc in retrieved_docs:
+            source_info = {
+                "source": os.path.basename(_get_doc_metadata(doc, 'source', 'N/A')),
+                "page": _get_doc_metadata(doc, 'page', 0) + 1,
+                "content_preview": doc.page_content[:250] + "..."
+            }
+            current_sources.append(source_info)
 
-                image_paths_str = _get_doc_metadata(doc, 'image_paths', '')
-                if image_paths_str:
-                    image_paths_list = image_paths_str.split(';')
-                    for img_path in image_paths_list:
-                        if os.path.exists(img_path):
-                            st.image(img_path, width=200)
-                            image_sources_to_pass.append(img_path)
-                            all_image_paths.append(img_path)
-                            current_images.append(img_path)
+            image_paths_str = _get_doc_metadata(doc, 'image_paths', '')
+            if image_paths_str:
+                image_paths_list = image_paths_str.split(';')
+                for img_path in image_paths_list:
+                    if os.path.exists(img_path) and img_path not in current_response_images:
+                        current_response_images.append(img_path)
+                        all_image_paths.append(img_path)
+        
+        # Store data for this specific response
+        response_index = len(msgs.messages)  # This will be the AI response index
+        response_key = f"response_{response_index}"
+        
+        has_ocr = any(_get_doc_metadata(doc, 'has_ocr', False) for doc in retrieved_docs)
+        
+        st.session_state.response_data[response_key] = {
+            'sources': current_sources,
+            'images': current_response_images,
+            'text_length': len(context_text),
+            'has_ocr': has_ocr,
+            'timestamp': st.session_state.get('current_time', 'unknown')
+        }
+        
+        # Show sources for current response (this will be visible during generation)
+        with st.expander(f"📚 Sources for this response ({len(current_sources)} sources, {len(current_response_images)} images)", expanded=False):
+            for source in current_sources:
+                st.markdown(f"**Source:** `{source['source']}` | **Page:** `{source['page']}`")
+                st.caption(f"Content: *{source['content_preview']}*")
+            
+            if current_response_images:
+                st.markdown("**Images in this response:**")
+                for img_path in current_response_images:
+                    if os.path.exists(img_path):
+                        st.image(img_path, width=200, caption=f"From: {os.path.basename(img_path)}")
             
             # Quick stats for this response
             col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("Sources", len(current_sources))
             with col2:
-                st.metric("Images", len(current_images))
+                st.metric("Images", len(current_response_images))
             with col3:
                 st.metric("Text Length", f"{len(context_text)} chars")
             with col4:
-                has_ocr = any(_get_doc_metadata(doc, 'has_ocr', False) for doc in retrieved_docs)
                 st.metric("OCR Used", "Yes" if has_ocr else "No")
 
         prompt_content_text = conversational_qa_prompt.format(
@@ -356,11 +412,13 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
             question=user_prompt
         )
         
-        if not context_text.strip() and not image_sources_to_pass:
+        if not context_text.strip() and not current_response_images:
             st.error("Could not extract any relevant content from the documents. Please try a different question.", icon="🤷")
         else:
             prompt_content = [{"type": "text", "text": prompt_content_text}]
-            for img_path in image_sources_to_pass:
+            
+            # Only add images that are relevant to current response
+            for img_path in current_response_images:
                 try:
                     img = Image.open(img_path)
                     buffered = BytesIO()
@@ -370,7 +428,7 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                     data_url = f"data:image/{img_format.lower()};base64,{img_str}"
                     prompt_content.append({"type": "image_url", "image_url": {"url": data_url}})
                 except Exception as e:
-                    st.warning(f"Could not process image {img_path}: {e}")
+                    st.warning(f"Could not process image {os.path.basename(img_path)}: {e}")
 
             multimodal_message = HumanMessage(content=prompt_content)
 
@@ -379,17 +437,18 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                 response = llm.invoke([multimodal_message])
                 full_response = response.content
 
-                # Parse and render response with inline images
+                # Parse and render response with inline images (only current response images)
                 image_pattern = r'\[IMAGE:\s*(.*?)\]'
                 parts = re.split(image_pattern, full_response)
 
                 for i, part in enumerate(parts):
                     if i % 2 == 1:  # This is an image path
                         image_path = part.strip()
-                        if os.path.exists(image_path):
-                            st.image(image_path, width=400)
+                        # Only show if image is in current response images
+                        if image_path in current_response_images and os.path.exists(image_path):
+                            st.image(image_path, width=400, caption=f"Referenced: {os.path.basename(image_path)}")
                         else:
-                            st.warning(f"AI referenced an image that could not be found: {image_path}")
+                            st.warning(f"AI referenced an image not in current context: {os.path.basename(image_path)}")
                     else:  # This is text part
                         if part.strip():
                             st.markdown(part)
