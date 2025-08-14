@@ -1,6 +1,5 @@
 # =====================================================================
 #  FIX FOR SQLITE3 ON STREAMLIT CLOUD
-#  This code snippet must be placed at the top of your app's script.
 # =====================================================================
 try:
     __import__('pysqlite3')
@@ -13,19 +12,16 @@ except ImportError:
 import streamlit as st
 import os
 import tempfile
-import pandas as pd
 from PIL import Image
 import base64
 from io import BytesIO
 import re
 import uuid
+from typing import List, Dict, Any
 
 # LangChain and AI components
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_community.chat_message_histories import StreamlitChatMessageHistory
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_core.runnables import RunnablePassthrough
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain.storage import InMemoryStore
 from langchain.retrievers.multi_vector import MultiVectorRetriever
@@ -37,11 +33,7 @@ from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 # --- UTILITY FUNCTIONS ---
 
-def format_chat_history(chat_history):
-    """Formats chat history into a string."""
-    return "\n".join(f"{msg.type.capitalize()}: {msg.content}" for msg in chat_history)
-
-def image_to_base64(image_path):
+def image_to_base64(image_path: str) -> str | None:
     """Converts an image file to a base64 data URL."""
     try:
         img = Image.open(image_path)
@@ -50,31 +42,34 @@ def image_to_base64(image_path):
         img.save(buffered, format=img_format)
         img_str = base64.b64encode(buffered.getvalue()).decode()
         return f"data:image/{img_format.lower()};base64,{img_str}"
-    except Exception:
+    except Exception as e:
+        st.warning(f"Could not process image {os.path.basename(image_path)}: {e}")
         return None
 
-# --- CORE LOGIC: MULTI-VECTOR RETRIEVER ---
+def format_chat_history(chat_history: List[Dict[str, Any]]) -> str:
+    """Formats chat history into a string."""
+    formatted_messages = []
+    for msg in chat_history:
+        role = "User" if msg["role"] == "user" else "Assistant"
+        content = msg["content"]
+        # In case content is a list (multimodal), find the text part
+        if isinstance(content, list):
+            text_part = next((item['text'] for item in content if item['type'] == 'text'), "")
+            formatted_messages.append(f"{role}: {text_part}")
+        else:
+            formatted_messages.append(f"{role}: {content}")
+    return "\n".join(formatted_messages)
 
-@st.cache_resource(ttl="2h")
-def configure_multi_vector_retriever(uploaded_files, temp_dir_path, api_key):
-    """
-    Creates a MultiVectorRetriever with summaries for text, tables, and images.
-    """
-    if not uploaded_files:
-        return None
+# --- CORE LOGIC: RE-ENGINEERED PIPELINE ---
 
-    processing_log = st.empty()
-
-    # 1. Partition documents into raw elements
-    processing_log.info("Step 1/4: Partitioning documents into text, tables, and images...")
-    raw_pdf_elements = []
+def partition_documents(uploaded_files: List[st.runtime.uploaded_file_manager.UploadedFile], temp_dir_path: str) -> List[Any]:
+    """Partitions uploaded PDF files into a list of unstructured elements."""
+    raw_elements = []
     for file in uploaded_files:
         temp_filepath = os.path.join(temp_dir_path, file.name)
         with open(temp_filepath, "wb") as f:
             f.write(file.getvalue())
-        
         try:
-            # Use unstructured to partition the PDF, which includes OCR
             elements = partition_pdf(
                 filename=temp_filepath,
                 extract_images_in_pdf=True,
@@ -85,72 +80,93 @@ def configure_multi_vector_retriever(uploaded_files, temp_dir_path, api_key):
                 combine_text_under_n_chars=2000,
                 image_output_dir_path=temp_dir_path,
             )
-            raw_pdf_elements.extend(elements)
+            raw_elements.extend(elements)
         except Exception as e:
             st.error(f"Error partitioning file '{file.name}': {e}", icon="⚠️")
-            continue
-    
-    if not raw_pdf_elements:
-        st.warning("Could not partition any documents. Please check the file format.")
-        return None
-    
-    processing_log.info(f"Step 2/4: Found {len(raw_pdf_elements)} elements. Generating summaries...")
+    return raw_elements
 
-    # 2. Create summaries and associate with original elements
+def summarize_elements(elements: List[Any], api_key: str) -> Dict[str, str]:
+    """Generates summaries for text, tables, and images using batch processing."""
     summary_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", google_api_key=api_key, temperature=0)
     image_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", google_api_key=api_key, temperature=0)
 
-    element_summaries = []
-    element_ids = []
-    original_elements = {}
+    texts_to_summarize = []
+    tables_to_summarize = []
+    images_to_describe = []
     
-    for element in raw_pdf_elements:
-        element_id = str(uuid.uuid4())
-        summary = ""
-        
+    for element in elements:
         if 'unstructured.documents.elements.Table' in str(type(element)):
-            summary = summary_llm.invoke("Summarize the following table content: \n\n" + str(element)).content
+            tables_to_summarize.append(str(element))
         elif 'unstructured.documents.elements.CompositeElement' in str(type(element)):
-            summary = summary_llm.invoke("Summarize the following text chunk: \n\n" + str(element)).content
+            texts_to_summarize.append(str(element))
         elif 'unstructured.documents.elements.Image' in str(type(element)):
             img_path = element.metadata.image_path
             if img_path and os.path.exists(img_path):
-                data_url = image_to_base64(img_path)
-                if data_url:
-                    desc = image_llm.invoke([
-                        HumanMessage(content=[
-                            {"type": "text", "text": "Describe the content and context of this image in detail."},
-                            {"type": "image_url", "image_url": {"url": data_url}}
-                        ])
-                    ])
-                    summary = desc.content
+                images_to_describe.append(img_path)
+
+    # Use batch processing for efficiency
+    text_summaries = summary_llm.batch(texts_to_summarize) if texts_to_summarize else []
+    table_summaries = summary_llm.batch(tables_to_summarize) if tables_to_summarize else []
+    
+    image_desc_prompts = [
+        HumanMessage(content=[
+            {"type": "text", "text": "Describe the content and context of this image in detail."},
+            {"type": "image_url", "image_url": {"url": image_to_base64(img_path)}}
+        ]) for img_path in images_to_describe if image_to_base64(img_path)
+    ]
+    image_descriptions = image_llm.batch(image_desc_prompts) if image_desc_prompts else []
+
+    summaries = [s.content for s in text_summaries] + \
+                [s.content for s in table_summaries] + \
+                [d.content for d in image_descriptions]
+    
+    # Create a mapping from original element to its summary
+    original_elements = texts_to_summarize + tables_to_summarize + images_to_describe
+    
+    return dict(zip(summaries, original_elements))
+
+
+@st.cache_resource(ttl="2h")
+def configure_multi_vector_retriever(uploaded_files: List[st.runtime.uploaded_file_manager.UploadedFile], temp_dir_path: str, api_key: str) -> MultiVectorRetriever | None:
+    """Creates a MultiVectorRetriever with summaries for text, tables, and images."""
+    if not uploaded_files:
+        return None
+
+    with st.status("Processing documents...", expanded=True) as status:
+        st.write("Step 1/4: Partitioning documents...")
+        raw_elements = partition_documents(uploaded_files, temp_dir_path)
+        if not raw_elements:
+            status.update(label="Processing failed: No elements found.", state="error")
+            return None
         
-        if summary:
-            element_summaries.append(summary)
-            element_ids.append(element_id)
-            original_elements[element_id] = element
+        st.write(f"Step 2/4: Found {len(raw_elements)} elements. Generating summaries...")
+        summary_element_map = summarize_elements(raw_elements, api_key)
+        if not summary_element_map:
+            status.update(label="Processing failed: Could not generate summaries.", state="error")
+            return None
 
-    processing_log.info("Step 3/4: Storing summaries and raw elements...")
+        st.write("Step 3/4: Storing summaries and raw elements...")
+        summaries = list(summary_element_map.keys())
+        original_elements = list(summary_element_map.values())
+        element_ids = [str(uuid.uuid4()) for _ in original_elements]
 
-    # 3. Store raw elements and create the MultiVectorRetriever
-    vectorstore = Chroma(
-        collection_name="summaries",
-        embedding_function=GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
-    )
-    docstore = InMemoryStore()
+        vectorstore = Chroma(
+            collection_name="summaries",
+            embedding_function=GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
+        )
+        docstore = InMemoryStore()
+        
+        vectorstore.add_texts(texts=summaries, ids=element_ids)
+        docstore.mset(list(zip(element_ids, original_elements)))
+
+        status.update(label="Step 4/4: Retriever is ready!", state="complete")
     
-    vectorstore.add_texts(texts=element_summaries, ids=element_ids)
-    docstore.mset(list(original_elements.items()))
-
-    processing_log.success("Step 4/4: Retriever is ready! You can now ask questions.")
-    
-    retriever = MultiVectorRetriever(
+    return MultiVectorRetriever(
         vectorstore=vectorstore,
         docstore=docstore,
         id_key="doc_id",
         search_kwargs={'k': 5}
     )
-    return retriever
 
 # --- MAIN APP ---
 
@@ -189,11 +205,8 @@ if not retriever:
     st.warning("Retriever could not be configured. Please check your files and try again.")
     st.stop()
 
-# Initialize chat history in session state
 if "messages" not in st.session_state:
-    st.session_state.messages = [
-        {"role": "ai", "content": "Hello! I'm ready to analyze your documents. How can I help?"}
-    ]
+    st.session_state.messages = [{"role": "ai", "content": "Hello! I'm ready to analyze your documents. How can I help?"}]
 
 # --- LLM AND PROMPT SETUP ---
 safety_settings = {
@@ -217,8 +230,7 @@ conversational_qa_template = """You are an expert research assistant. Your goal 
 2.  Carefully examine the context, which is composed of raw text, tables, and images.
 3.  When you reference information from an image, you MUST embed it in your response using the placeholder format: [IMAGE: <path_to_image>] where <path_to_image> is the full path provided in the context.
 4.  Synthesize all information to construct a comprehensive answer. Format it for clarity using Markdown (tables, lists, bolding).
-5.  Conclude your response with a "Key Highlights" section.
-6.  If the context does not contain the answer, state that clearly.
+5.  If the context does not contain the answer, state that clearly.
 
 **Chat History:**
 {chat_history}
@@ -233,10 +245,8 @@ conversational_qa_prompt = ChatPromptTemplate.from_template(conversational_qa_te
 
 # --- CHATBOT UI AND LOGIC ---
 
-# Display existing messages
 for msg in st.session_state.messages:
     with st.chat_message(msg["role"]):
-        # This part is for displaying the final rendered content
         if "rendered_content" in msg:
             for part in msg["rendered_content"]:
                 if part["type"] == "text":
@@ -247,7 +257,6 @@ for msg in st.session_state.messages:
         else:
             st.markdown(msg["content"])
 
-
 if user_prompt := st.chat_input("Ask a question about your documents..."):
     st.session_state.messages.append({"role": "user", "content": user_prompt})
     st.chat_message("user").write(user_prompt)
@@ -255,8 +264,8 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
     with st.chat_message("ai"):
         retrieved_elements = retriever.invoke(user_prompt)
         
-        context_text = "\n\n".join([str(el) for el in retrieved_elements if 'Image' not in str(type(el))])
-        context_images = [el.metadata['image_path'] for el in retrieved_elements if 'Image' in str(type(el))]
+        context_text = "\n\n".join([str(el) for el in retrieved_elements if isinstance(el, str)])
+        context_images = [el for el in retrieved_elements if not isinstance(el, str)]
         
         with st.expander("📚 View Retrieved Context"):
             st.markdown("#### Text & Tables:")
@@ -287,7 +296,6 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                 response = llm.invoke([multimodal_message])
                 full_response = response.content
 
-                # Parse the response and render text and images
                 image_pattern = r'\[IMAGE:\s*(.*?)\]'
                 parts = re.split(image_pattern, full_response)
                 
@@ -305,7 +313,6 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                             st.markdown(part)
                             rendered_content.append({"type": "text", "content": part})
                 
-                # Store the original response and the rendered parts for persistent display
                 st.session_state.messages.append({
                     "role": "ai", 
                     "content": full_response, 
