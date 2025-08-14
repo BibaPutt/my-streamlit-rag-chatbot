@@ -13,3 +13,6 @@ lxml
 Pillow
 pysqlite3-binary
 python-pptx
+langchain-chroma
+unstructured[all-docs]
+
