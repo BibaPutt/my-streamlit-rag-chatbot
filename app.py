@@ -52,10 +52,23 @@ def _get_doc_metadata(doc, key, default=None):
     """Safely retrieves a key from a document's metadata."""
     return doc.metadata.get(key, default)
 
-# Simple PDF loading (keeping your original fast version)
+# OCR function for image-heavy PDFs
+def simple_ocr_extraction(image_path):
+    """Simple OCR extraction with error handling."""
+    try:
+        import pytesseract
+        from PIL import Image
+        img = Image.open(image_path)
+        text = pytesseract.image_to_string(img)
+        return text.strip()
+    except Exception as e:
+        # If OCR fails, return empty string
+        return ""
+
+# Enhanced PDF loading with OCR fallback
 def load_pdf_with_images(file_path, temp_dir_path):
     """
-    Manually loads a PDF, extracts text and images, and associates them.
+    Manually loads a PDF, extracts text and images, with OCR fallback for image-heavy PDFs.
     """
     documents = []
     image_save_dir = os.path.join(temp_dir_path, "images", os.path.splitext(os.path.basename(file_path))[0])
@@ -66,6 +79,7 @@ def load_pdf_with_images(file_path, temp_dir_path):
         page = pdf_document.load_page(page_num)
         text = page.get_text()
         image_paths = []
+        ocr_texts = []
 
         image_list = page.get_images(full=True)
         for img_index, img in enumerate(image_list):
@@ -80,14 +94,30 @@ def load_pdf_with_images(file_path, temp_dir_path):
                 img_file.write(image_bytes)
             image_paths.append(image_path)
             
+            # If no text found, try OCR on images
+            if not text.strip():
+                ocr_text = simple_ocr_extraction(image_path)
+                if ocr_text:
+                    ocr_texts.append(f"Image {img_index+1} text: {ocr_text}")
+        
+        # Combine extracted text with OCR text
+        combined_text = text
+        if ocr_texts:
+            combined_text += "\n\n" + "\n".join(ocr_texts)
+        
+        # If still no content, add a placeholder
+        if not combined_text.strip():
+            combined_text = f"[Page {page_num+1} contains images - visual content available]"
+            
         image_paths_str = ";".join(image_paths)
         
         documents.append(Document(
-            page_content=text,
+            page_content=combined_text,
             metadata={
                 'source': os.path.basename(file_path),
                 'page': page_num,
-                'image_paths': image_paths_str
+                'image_paths': image_paths_str,
+                'has_ocr': bool(ocr_texts)
             }
         ))
     return documents
@@ -140,6 +170,13 @@ def configure_retriever(uploaded_files, temp_dir_path):
 
     text_splitter = RecursiveCharacterTextSplitter(chunk_size=4000, chunk_overlap=250)
     doc_chunks = text_splitter.split_documents(docs)
+    
+    # Filter out empty chunks that could cause embedding errors
+    doc_chunks = [chunk for chunk in doc_chunks if chunk.page_content.strip()]
+    
+    if not doc_chunks:
+        st.warning("No text content could be extracted from the documents. Please check if files contain readable text or images with text.")
+        return None
 
     api_key = st.secrets.get("GOOGLE_API_KEY")
     if not api_key:
@@ -148,9 +185,14 @@ def configure_retriever(uploaded_files, temp_dir_path):
 
     embeddings_model = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
     chroma_settings = Settings(anonymized_telemetry=False)
-    vectorstore = Chroma.from_documents(doc_chunks, embeddings_model, client_settings=chroma_settings)
-
-    return vectorstore.as_retriever(search_kwargs={"k": 10})
+    
+    try:
+        vectorstore = Chroma.from_documents(doc_chunks, embeddings_model, client_settings=chroma_settings)
+        return vectorstore.as_retriever(search_kwargs={"k": 10})
+    except Exception as e:
+        st.error(f"Error creating vector store: {e}")
+        st.error("This might be due to empty content or embedding issues. Please try different documents.")
+        return None
 
 # --- MAIN APP ---
 
@@ -296,13 +338,16 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                             current_images.append(img_path)
             
             # Quick stats for this response
-            col1, col2, col3 = st.columns(3)
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
                 st.metric("Sources", len(current_sources))
             with col2:
                 st.metric("Images", len(current_images))
             with col3:
                 st.metric("Text Length", f"{len(context_text)} chars")
+            with col4:
+                has_ocr = any(_get_doc_metadata(doc, 'has_ocr', False) for doc in retrieved_docs)
+                st.metric("OCR Used", "Yes" if has_ocr else "No")
 
         prompt_content_text = conversational_qa_prompt.format(
             context=context_text,
