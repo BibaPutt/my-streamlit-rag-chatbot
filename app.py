@@ -249,7 +249,7 @@ llm = ChatGoogleGenerativeAI(
     safety_settings=safety_settings,
 )
 
-# Updated prompt for better answer quality
+# Updated prompt for better answer quality with smart image embedding
 conversational_qa_template = """You are an expert research assistant with deep analytical capabilities. Your goal is to provide comprehensive, well-structured, and insightful answers based on the provided context.
 
 **Instructions:**
@@ -261,7 +261,11 @@ conversational_qa_template = """You are an expert research assistant with deep a
    - Supporting evidence from the context
    - Examples when available
    - Analysis of implications or significance
-5. When referencing images, use: [IMAGE: <path_to_image>] and explain what the image shows in relation to your answer.
+5. **SMART IMAGE EMBEDDING**: Only embed images that are directly relevant to your answer using [IMAGE: <path_to_image>]. 
+   - Embed images at the RIGHT MOMENT in your text where they add value
+   - Don't embed all images - only select the most relevant ones (usually 1-3 images max)
+   - Place images where they naturally support your explanation
+   - Explain what the image shows and why it's relevant right after embedding it
 6. Include relevant details such as:
    - Advantages and disadvantages when discussing concepts
    - Step-by-step explanations for processes
@@ -277,6 +281,7 @@ conversational_qa_template = """You are an expert research assistant with deep a
 - Provide context and background when needed
 - Explain technical terms in accessible language
 - Draw connections between different pieces of information
+- Embed images naturally within the flow of text where they add most value
 
 **Chat History:**
 {chat_history}
@@ -290,7 +295,7 @@ conversational_qa_template = """You are an expert research assistant with deep a
 **Question:**
 {question}
 
-Please provide a comprehensive, well-structured response that thoroughly addresses the user's question."""
+Please provide a comprehensive, well-structured response that thoroughly addresses the user's question. Remember to be selective with images - only embed the most relevant ones at the right moments in your explanation."""
 conversational_qa_prompt = ChatPromptTemplate.from_template(conversational_qa_template)
 
 # --- MAIN CHAT INTERFACE ---
@@ -336,7 +341,7 @@ for idx, msg in enumerate(msgs.messages):
                     with col4:
                         st.metric("🔍 OCR", "✅" if stored_data['has_ocr'] else "❌")
             
-            # Parse and display the AI response with proper image handling
+            # Parse and display the AI response with naturally embedded images
             if "[IMAGE:" in msg.content:
                 self_images = st.session_state.response_data.get(response_key, {}).get('images', [])
                 image_pattern = r'\[IMAGE:\s*(.*?)\]'
@@ -346,20 +351,20 @@ for idx, msg in enumerate(msgs.messages):
                     if i % 2 == 1:  # This is an image path
                         image_path = part.strip()
                         # Check if image exists and belongs to this response
+                        found_image = None
+                        
                         if os.path.exists(image_path) and image_path in self_images:
-                            st.image(image_path, caption=f"📸 {os.path.basename(image_path)}", width=500)
+                            found_image = image_path
                         else:
-                            # Try to find the image in stored images
-                            found_image = None
+                            # Try to find the image by filename
                             for stored_img in self_images:
                                 if os.path.basename(stored_img) == os.path.basename(image_path) and os.path.exists(stored_img):
                                     found_image = stored_img
                                     break
-                            
-                            if found_image:
-                                st.image(found_image, caption=f"📸 {os.path.basename(found_image)}", width=500)
-                            else:
-                                st.warning(f"⚠️ Referenced image not available: {os.path.basename(image_path)}")
+                        
+                        if found_image:
+                            # Embed image naturally without caption clutter
+                            st.image(found_image, width=500)
                     else:  # This is text
                         if part.strip():
                             st.markdown(part)
