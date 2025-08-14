@@ -249,17 +249,34 @@ llm = ChatGoogleGenerativeAI(
     safety_settings=safety_settings,
 )
 
-# Updated prompt with flexible formatting
-conversational_qa_template = """You are an expert research assistant. Your goal is to provide clear, accurate, and well-formatted answers based on the provided context, which may include text and images.
+# Updated prompt for better answer quality
+conversational_qa_template = """You are an expert research assistant with deep analytical capabilities. Your goal is to provide comprehensive, well-structured, and insightful answers based on the provided context.
 
 **Instructions:**
-1.  Analyze the user's question and the provided chat history.
-2.  Carefully examine the context, including any text and images. The context provided under 'Context:' is the most relevant information.
-3.  Synthesize the information to construct a comprehensive answer.
-4.  When you reference information from an image, you MUST embed it in your response using the placeholder format: [IMAGE: <path_to_image>] where <path_to_image> is the full path provided in the context.
-5.  Format your response naturally based on the question - use tables for data, lists for steps, or paragraphs for explanations as appropriate.
-6.  Use markdown formatting (bold, italics, headers) to make your answer readable and well-structured.
-7.  If the context (including images) does not contain the answer, state that clearly. Do not make up information.
+1. Analyze the user's question thoroughly and understand what type of response they need.
+2. Carefully examine all provided context, including text content and any images.
+3. Structure your response with clear sections using markdown headers (##, ###) when appropriate.
+4. For each main point, provide:
+   - Clear explanation or definition
+   - Supporting evidence from the context
+   - Examples when available
+   - Analysis of implications or significance
+5. When referencing images, use: [IMAGE: <path_to_image>] and explain what the image shows in relation to your answer.
+6. Include relevant details such as:
+   - Advantages and disadvantages when discussing concepts
+   - Step-by-step explanations for processes
+   - Comparisons and contrasts when relevant
+   - Technical details with clear explanations
+7. End with a brief summary or conclusion that ties everything together.
+8. If the context lacks sufficient information, clearly state what's missing and provide what you can from available sources.
+
+**Response Structure Guidelines:**
+- Use headers to organize information logically
+- Include bullet points for lists and key features
+- Bold important terms and concepts
+- Provide context and background when needed
+- Explain technical terms in accessible language
+- Draw connections between different pieces of information
 
 **Chat History:**
 {chat_history}
@@ -272,7 +289,8 @@ conversational_qa_template = """You are an expert research assistant. Your goal 
 
 **Question:**
 {question}
-"""
+
+Please provide a comprehensive, well-structured response that thoroughly addresses the user's question."""
 conversational_qa_prompt = ChatPromptTemplate.from_template(conversational_qa_template)
 
 # --- MAIN CHAT INTERFACE ---
@@ -294,48 +312,59 @@ for idx, msg in enumerate(msgs.messages):
             if response_key in st.session_state.response_data:
                 # Display stored sources for this specific response
                 stored_data = st.session_state.response_data[response_key]
-                with st.expander(f"📚 Sources for this response ({len(stored_data['sources'])} sources, {len(stored_data['images'])} images)"):
+                with st.expander(f"📚 Sources ({len(stored_data['sources'])} sources, {len(stored_data['images'])} images)", expanded=False):
                     for source in stored_data['sources']:
-                        st.markdown(f"**Source:** `{source['source']}` | **Page:** `{source['page']}`")
-                        st.caption(f"Content: *{source['content_preview']}*")
+                        st.markdown(f"**📄 {source['source']}** - Page {source['page']}")
+                        st.caption(source['content_preview'])
                     
                     if stored_data['images']:
-                        st.markdown("**Images:**")
-                        for img_path in stored_data['images']:
+                        st.markdown("**🖼️ Images:**")
+                        cols = st.columns(min(3, len(stored_data['images'])))
+                        for i, img_path in enumerate(stored_data['images']):
                             if os.path.exists(img_path):
-                                st.image(img_path, width=200, caption=f"From: {os.path.basename(img_path)}")
+                                with cols[i % 3]:
+                                    st.image(img_path, caption=os.path.basename(img_path), use_column_width=True)
                     
                     # Stats
                     col1, col2, col3, col4 = st.columns(4)
                     with col1:
-                        st.metric("Sources", len(stored_data['sources']))
+                        st.metric("📄 Sources", len(stored_data['sources']))
                     with col2:
-                        st.metric("Images", len(stored_data['images']))
+                        st.metric("🖼️ Images", len(stored_data['images']))
                     with col3:
-                        st.metric("Text Length", f"{stored_data['text_length']} chars")
+                        st.metric("📝 Text", f"{stored_data['text_length']} chars")
                     with col4:
-                        st.metric("OCR Used", "Yes" if stored_data['has_ocr'] else "No")
+                        st.metric("🔍 OCR", "✅" if stored_data['has_ocr'] else "❌")
             
-            # Parse and display text with inline images (but only for current response images)
+            # Parse and display the AI response with proper image handling
             if "[IMAGE:" in msg.content:
+                self_images = st.session_state.response_data.get(response_key, {}).get('images', [])
                 image_pattern = r'\[IMAGE:\s*(.*?)\]'
                 parts = re.split(image_pattern, msg.content)
                 
                 for i, part in enumerate(parts):
                     if i % 2 == 1:  # This is an image path
                         image_path = part.strip()
-                        # Only show if image exists and belongs to this response
-                        if (os.path.exists(image_path) and 
-                            response_key in st.session_state.response_data and 
-                            image_path in st.session_state.response_data[response_key]['images']):
-                            st.image(image_path, width=400, caption=f"Referenced: {os.path.basename(image_path)}")
+                        # Check if image exists and belongs to this response
+                        if os.path.exists(image_path) and image_path in self_images:
+                            st.image(image_path, caption=f"📸 {os.path.basename(image_path)}", width=500)
                         else:
-                            st.warning(f"Referenced image not available: {os.path.basename(image_path)}")
+                            # Try to find the image in stored images
+                            found_image = None
+                            for stored_img in self_images:
+                                if os.path.basename(stored_img) == os.path.basename(image_path) and os.path.exists(stored_img):
+                                    found_image = stored_img
+                                    break
+                            
+                            if found_image:
+                                st.image(found_image, caption=f"📸 {os.path.basename(found_image)}", width=500)
+                            else:
+                                st.warning(f"⚠️ Referenced image not available: {os.path.basename(image_path)}")
                     else:  # This is text
                         if part.strip():
                             st.markdown(part)
             else:
-                st.write(msg.content)
+                st.markdown(msg.content)
         else:
             st.write(msg.content)
 
@@ -383,27 +412,34 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
         }
         
         # Show sources for current response (this will be visible during generation)
-        with st.expander(f"📚 Sources for this response ({len(current_sources)} sources, {len(current_response_images)} images)", expanded=False):
-            for source in current_sources:
-                st.markdown(f"**Source:** `{source['source']}` | **Page:** `{source['page']}`")
-                st.caption(f"Content: *{source['content_preview']}*")
+        with st.expander(f"📚 Current Response Sources ({len(current_sources)} sources, {len(current_response_images)} images)", expanded=True):
+            # Sources
+            if current_sources:
+                st.markdown("**📄 Document Sources:**")
+                for source in current_sources:
+                    st.markdown(f"• **{source['source']}** - Page {source['page']}")
+                    st.caption(f"Preview: _{source['content_preview']}_")
             
+            # Images
             if current_response_images:
-                st.markdown("**Images in this response:**")
-                for img_path in current_response_images:
+                st.markdown("**🖼️ Retrieved Images:**")
+                cols = st.columns(min(4, len(current_response_images)))
+                for i, img_path in enumerate(current_response_images):
                     if os.path.exists(img_path):
-                        st.image(img_path, width=200, caption=f"From: {os.path.basename(img_path)}")
+                        with cols[i % 4]:
+                            st.image(img_path, caption=os.path.basename(img_path), use_column_width=True)
             
-            # Quick stats for this response
+            # Quick stats
+            st.markdown("**📊 Response Stats:**")
             col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Sources", len(current_sources))
+                st.metric("📄 Sources", len(current_sources))
             with col2:
-                st.metric("Images", len(current_response_images))
+                st.metric("🖼️ Images", len(current_response_images))
             with col3:
-                st.metric("Text Length", f"{len(context_text)} chars")
+                st.metric("📝 Text", f"{len(context_text)} chars")
             with col4:
-                st.metric("OCR Used", "Yes" if has_ocr else "No")
+                st.metric("🔍 OCR", "✅" if has_ocr else "❌")
 
         prompt_content_text = conversational_qa_prompt.format(
             context=context_text,
