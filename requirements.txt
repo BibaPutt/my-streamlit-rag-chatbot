@@ -14,4 +14,3 @@ Pillow
 pysqlite3-binary
 python-pptx
 pytesseract
-numpy
