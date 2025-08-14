@@ -22,7 +22,7 @@ from typing import List, Dict, Any
 # LangChain and AI components
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.messages import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage
 from langchain.storage import InMemoryStore
 from langchain.retrievers.multi_vector import MultiVectorRetriever
 from unstructured.partition.pdf import partition_pdf
@@ -47,17 +47,12 @@ def image_to_base64(image_path: str) -> str | None:
         return None
 
 def format_chat_history(chat_history: List[Dict[str, Any]]) -> str:
-    """Formats chat history into a string."""
+    """Formats chat history into a string for the LLM."""
     formatted_messages = []
     for msg in chat_history:
         role = "User" if msg["role"] == "user" else "Assistant"
-        content = msg["content"]
-        # In case content is a list (multimodal), find the text part
-        if isinstance(content, list):
-            text_part = next((item['text'] for item in content if item['type'] == 'text'), "")
-            formatted_messages.append(f"{role}: {text_part}")
-        else:
-            formatted_messages.append(f"{role}: {content}")
+        content = msg.get("original_content", msg.get("content", ""))
+        formatted_messages.append(f"{role}: {content}")
     return "\n".join(formatted_messages)
 
 # --- CORE LOGIC: RE-ENGINEERED PIPELINE ---
@@ -85,45 +80,51 @@ def partition_documents(uploaded_files: List[st.runtime.uploaded_file_manager.Up
             st.error(f"Error partitioning file '{file.name}': {e}", icon="⚠️")
     return raw_elements
 
-def summarize_elements(elements: List[Any], api_key: str) -> Dict[str, str]:
-    """Generates summaries for text, tables, and images using batch processing."""
+def summarize_elements(elements: List[Any], api_key: str) -> Dict[str, Any]:
+    """Generates summaries for text, tables, and images using efficient batch processing."""
     summary_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", google_api_key=api_key, temperature=0)
     image_llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash-latest", google_api_key=api_key, temperature=0)
 
-    texts_to_summarize = []
-    tables_to_summarize = []
-    images_to_describe = []
-    
-    for element in elements:
-        if 'unstructured.documents.elements.Table' in str(type(element)):
-            tables_to_summarize.append(str(element))
-        elif 'unstructured.documents.elements.CompositeElement' in str(type(element)):
-            texts_to_summarize.append(str(element))
-        elif 'unstructured.documents.elements.Image' in str(type(element)):
-            img_path = element.metadata.image_path
-            if img_path and os.path.exists(img_path):
-                images_to_describe.append(img_path)
+    texts_to_summarize, tables_to_summarize, images_to_describe = [], [], []
+    original_elements_map = {}
 
-    # Use batch processing for efficiency
-    text_summaries = summary_llm.batch(texts_to_summarize) if texts_to_summarize else []
-    table_summaries = summary_llm.batch(tables_to_summarize) if tables_to_summarize else []
+    for el in elements:
+        element_id = str(uuid.uuid4())
+        original_elements_map[element_id] = el
+        if 'unstructured.documents.elements.Table' in str(type(el)):
+            tables_to_summarize.append({"id": element_id, "content": str(el)})
+        elif 'unstructured.documents.elements.CompositeElement' in str(type(el)):
+            texts_to_summarize.append({"id": element_id, "content": str(el)})
+        elif 'unstructured.documents.elements.Image' in str(type(el)):
+            img_path = el.metadata.image_path
+            if img_path and os.path.exists(img_path):
+                images_to_describe.append({"id": element_id, "path": img_path})
+
+    # Batch process summaries
+    text_contents = [item['content'] for item in texts_to_summarize]
+    table_contents = [item['content'] for item in tables_to_summarize]
     
+    text_summaries_res = summary_llm.batch(text_contents) if text_contents else []
+    table_summaries_res = summary_llm.batch(table_contents) if table_contents else []
+
     image_desc_prompts = [
         HumanMessage(content=[
             {"type": "text", "text": "Describe the content and context of this image in detail."},
-            {"type": "image_url", "image_url": {"url": image_to_base64(img_path)}}
-        ]) for img_path in images_to_describe if image_to_base64(img_path)
+            {"type": "image_url", "image_url": {"url": image_to_base64(item['path'])}}
+        ]) for item in images_to_describe if image_to_base64(item['path'])
     ]
-    image_descriptions = image_llm.batch(image_desc_prompts) if image_desc_prompts else []
+    image_descriptions_res = image_llm.batch(image_desc_prompts) if image_desc_prompts else []
 
-    summaries = [s.content for s in text_summaries] + \
-                [s.content for s in table_summaries] + \
-                [d.content for d in image_descriptions]
-    
-    # Create a mapping from original element to its summary
-    original_elements = texts_to_summarize + tables_to_summarize + images_to_describe
-    
-    return dict(zip(summaries, original_elements))
+    # Map summaries back to their original IDs
+    summaries = {}
+    for i, summary in enumerate(text_summaries_res):
+        summaries[texts_to_summarize[i]['id']] = summary.content
+    for i, summary in enumerate(table_summaries_res):
+        summaries[tables_to_summarize[i]['id']] = summary.content
+    for i, desc in enumerate(image_descriptions_res):
+        summaries[images_to_describe[i]['id']] = desc.content
+        
+    return summaries, original_elements_map
 
 
 @st.cache_resource(ttl="2h")
@@ -133,33 +134,32 @@ def configure_multi_vector_retriever(uploaded_files: List[st.runtime.uploaded_fi
         return None
 
     with st.status("Processing documents...", expanded=True) as status:
-        st.write("Step 1/4: Partitioning documents...")
+        st.write("Step 1/4: Partitioning documents with OCR...")
         raw_elements = partition_documents(uploaded_files, temp_dir_path)
         if not raw_elements:
-            status.update(label="Processing failed: No elements found.", state="error")
+            status.update(label="Processing failed: No content found.", state="error")
             return None
         
         st.write(f"Step 2/4: Found {len(raw_elements)} elements. Generating summaries...")
-        summary_element_map = summarize_elements(raw_elements, api_key)
-        if not summary_element_map:
+        summaries, original_elements = summarize_elements(raw_elements, api_key)
+        if not summaries:
             status.update(label="Processing failed: Could not generate summaries.", state="error")
             return None
 
         st.write("Step 3/4: Storing summaries and raw elements...")
-        summaries = list(summary_element_map.keys())
-        original_elements = list(summary_element_map.values())
-        element_ids = [str(uuid.uuid4()) for _ in original_elements]
-
+        element_ids = list(summaries.keys())
+        summary_texts = list(summaries.values())
+        
         vectorstore = Chroma(
             collection_name="summaries",
             embedding_function=GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
         )
         docstore = InMemoryStore()
         
-        vectorstore.add_texts(texts=summaries, ids=element_ids)
-        docstore.mset(list(zip(element_ids, original_elements)))
+        vectorstore.add_texts(texts=summary_texts, ids=element_ids)
+        docstore.mset([(k, original_elements[k]) for k in element_ids])
 
-        status.update(label="Step 4/4: Retriever is ready!", state="complete")
+        status.update(label="Step 4/4: Retriever is ready!", state="complete", expanded=False)
     
     return MultiVectorRetriever(
         vectorstore=vectorstore,
@@ -264,8 +264,8 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
     with st.chat_message("ai"):
         retrieved_elements = retriever.invoke(user_prompt)
         
-        context_text = "\n\n".join([str(el) for el in retrieved_elements if isinstance(el, str)])
-        context_images = [el for el in retrieved_elements if not isinstance(el, str)]
+        context_text = "\n\n".join([str(el) for el in retrieved_elements if 'Image' not in str(type(el))])
+        context_images = [el.metadata['image_path'] for el in retrieved_elements if 'Image' in str(type(el))]
         
         with st.expander("📚 View Retrieved Context"):
             st.markdown("#### Text & Tables:")
