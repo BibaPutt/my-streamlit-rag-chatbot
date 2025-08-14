@@ -328,7 +328,7 @@ for idx, msg in enumerate(msgs.messages):
                         for i, img_path in enumerate(stored_data['images']):
                             if os.path.exists(img_path):
                                 with cols[i % 3]:
-                                    st.image(img_path, caption=os.path.basename(img_path), use_column_width=True)
+                                    st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
                     
                     # Stats
                     col1, col2, col3, col4 = st.columns(4)
@@ -432,7 +432,7 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                 for i, img_path in enumerate(current_response_images):
                     if os.path.exists(img_path):
                         with cols[i % 4]:
-                            st.image(img_path, caption=os.path.basename(img_path), use_column_width=True)
+                            st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
             
             # Quick stats
             st.markdown("**📊 Response Stats:**")
@@ -500,3 +500,4 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
             except Exception as e:
                 st.error("An error occurred while generating the response. This might be due to API rate limits or other issues.", icon="🚨")
                 st.error(f"Details: {e}")
+
