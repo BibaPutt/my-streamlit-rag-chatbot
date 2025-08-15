@@ -325,7 +325,7 @@ safety_settings = {
 }
 
 llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash-latest",
+    model="gemini-2.5-flash-lite",
     temperature=0.2,
     google_api_key=google_api_key,
     safety_settings=safety_settings,
@@ -536,3 +536,4 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                 st.error("⚠️ An error occurred while generating the response. This might be due to API rate limits.", icon="🚨")
                 st.error(f"Error details: {str(e)}")
                 st.info("💡 Please wait a moment and try again. The app includes rate limiting to prevent this issue.")
+
