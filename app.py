@@ -20,6 +20,7 @@ from langchain_core.documents import Document
 import base64
 from io import BytesIO
 import re
+import time
 
 # LangChain and AI components
 from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
@@ -122,6 +123,21 @@ def load_pdf_with_images(file_path, temp_dir_path):
         ))
     return documents
 
+# Rate limiting helper
+def check_rate_limit():
+    """Simple rate limiting to avoid API errors."""
+    if 'last_request_time' not in st.session_state:
+        st.session_state.last_request_time = 0
+    
+    current_time = time.time()
+    time_since_last = current_time - st.session_state.last_request_time
+    
+    # Wait at least 2 seconds between requests
+    if time_since_last < 2:
+        time.sleep(2 - time_since_last)
+    
+    st.session_state.last_request_time = time.time()
+
 # --- STATE MANAGEMENT AND CACHING ---
 
 @st.cache_resource(ttl="2h")
@@ -188,7 +204,7 @@ def configure_retriever(uploaded_files, temp_dir_path):
     
     try:
         vectorstore = Chroma.from_documents(doc_chunks, embeddings_model, client_settings=chroma_settings)
-        return vectorstore.as_retriever(search_kwargs={"k": 10})
+        return vectorstore.as_retriever(search_kwargs={"k": 8})  # Reduced from 10 to 8
     except Exception as e:
         st.error(f"Error creating vector store: {e}")
         st.error("This might be due to empty content or embedding issues. Please try different documents.")
@@ -199,8 +215,23 @@ def configure_retriever(uploaded_files, temp_dir_path):
 st.set_page_config(page_title="Multimodal RAG Assistant", page_icon="🧠", layout="wide")
 st.title("🧠 Advanced Multimodal RAG Assistant")
 
+# Initialize session state variables
 if 'temp_dir' not in st.session_state:
     st.session_state.temp_dir = tempfile.mkdtemp()
+
+if 'all_sources' not in st.session_state:
+    st.session_state.all_sources = []
+
+if 'all_images' not in st.session_state:
+    st.session_state.all_images = []
+
+if 'conversation_stats' not in st.session_state:
+    st.session_state.conversation_stats = {
+        'total_queries': 0,
+        'total_sources': 0,
+        'total_images': 0,
+        'has_ocr': False
+    }
 
 google_api_key = st.secrets.get("GOOGLE_API_KEY")
 if not google_api_key:
@@ -209,19 +240,71 @@ if not google_api_key:
 
 # --- SIDEBAR AND FILE UPLOAD ---
 with st.sidebar:
-    st.header("Upload Your Documents")
+    st.header("📁 Upload Your Documents")
     uploaded_files = st.file_uploader(
         label="Supports PDF, DOCX, TXT, HTML, PPTX, CSV",
         type=["pdf", "docx", "txt", "html", "pptx", "csv"],
         accept_multiple_files=True
     )
-    if st.button("Clear Conversation & Files"):
+    
+    if st.button("🗑️ Clear Conversation & Files"):
         st.session_state.langchain_messages = []
+        st.session_state.all_sources = []
+        st.session_state.all_images = []
+        st.session_state.conversation_stats = {
+            'total_queries': 0,
+            'total_sources': 0,
+            'total_images': 0,
+            'has_ocr': False
+        }
         st.cache_resource.clear()
         st.rerun()
+    
     st.markdown("---")
-    st.info("Image extraction is best supported for PDF files.", icon="ℹ️")
-    st.caption("Note: This app uses a free API tier. If you encounter errors, please wait a minute before trying again.")
+    
+    # Conversation Memory Panel
+    st.subheader("💭 Conversation Memory")
+    stats = st.session_state.conversation_stats
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("🔍 Queries", stats['total_queries'])
+        st.metric("📄 Sources", stats['total_sources'])
+    with col2:
+        st.metric("🖼️ Images", stats['total_images'])
+        st.metric("🔤 OCR", "✅" if stats['has_ocr'] else "❌")
+    
+    # Show accumulated sources
+    if st.session_state.all_sources:
+        with st.expander(f"📚 All Sources ({len(st.session_state.all_sources)})"):
+            unique_sources = {}
+            for source in st.session_state.all_sources:
+                key = f"{source['source']}_p{source['page']}"
+                if key not in unique_sources:
+                    unique_sources[key] = source
+            
+            for source in unique_sources.values():
+                st.caption(f"📄 {source['source']} - Page {source['page']}")
+    
+    # Show accumulated images
+    if st.session_state.all_images:
+        with st.expander(f"🖼️ All Images ({len(st.session_state.all_images)})"):
+            # Display images in a grid
+            num_images = len(st.session_state.all_images)
+            cols_per_row = 2
+            
+            for i in range(0, num_images, cols_per_row):
+                cols = st.columns(cols_per_row)
+                for j, col in enumerate(cols):
+                    if i + j < num_images:
+                        img_path = st.session_state.all_images[i + j]
+                        if os.path.exists(img_path):
+                            with col:
+                                st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
+    
+    st.markdown("---")
+    st.info("💡 Images are embedded directly in responses where relevant", icon="ℹ️")
+    st.caption("⚡ Rate limiting applied to prevent API errors")
 
 if not uploaded_files:
     st.info("Please upload your documents in the sidebar to start chatting.")
@@ -241,7 +324,6 @@ safety_settings = {
     HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
 }
 
-# Use a non-streaming model for this approach
 llm = ChatGoogleGenerativeAI(
     model="gemini-1.5-flash-latest",
     temperature=0.2,
@@ -249,39 +331,21 @@ llm = ChatGoogleGenerativeAI(
     safety_settings=safety_settings,
 )
 
-# Updated prompt for better answer quality with smart image embedding
-conversational_qa_template = """You are an expert research assistant with deep analytical capabilities. Your goal is to provide comprehensive, well-structured, and insightful answers based on the provided context.
+# Optimized prompt that naturally embeds images in text flow (like your original)
+conversational_qa_template = """You are an expert research assistant. Your goal is to provide clear, accurate, and well-formatted answers based on the provided context, which may include text and images.
 
 **Instructions:**
-1. Analyze the user's question thoroughly and understand what type of response they need.
-2. Carefully examine all provided context, including text content and any images.
-3. Structure your response with clear sections using markdown headers (##, ###) when appropriate.
-4. For each main point, provide:
-   - Clear explanation or definition
-   - Supporting evidence from the context
-   - Examples when available
-   - Analysis of implications or significance
-5. **SMART IMAGE EMBEDDING**: Only embed images that are directly relevant to your answer using [IMAGE: <path_to_image>]. 
-   - Embed images at the RIGHT MOMENT in your text where they add value
-   - Don't embed all images - only select the most relevant ones (usually 1-3 images max)
-   - Place images where they naturally support your explanation
-   - Explain what the image shows and why it's relevant right after embedding it
-6. Include relevant details such as:
-   - Advantages and disadvantages when discussing concepts
-   - Step-by-step explanations for processes
-   - Comparisons and contrasts when relevant
-   - Technical details with clear explanations
-7. End with a brief summary or conclusion that ties everything together.
-8. If the context lacks sufficient information, clearly state what's missing and provide what you can from available sources.
-
-**Response Structure Guidelines:**
-- Use headers to organize information logically
-- Include bullet points for lists and key features
-- Bold important terms and concepts
-- Provide context and background when needed
-- Explain technical terms in accessible language
-- Draw connections between different pieces of information
-- Embed images naturally within the flow of text where they add most value
+1. Analyze the user's question and the provided chat history.
+2. Carefully examine the context, including any text and images. The context provided under 'Context:' is the most relevant information.
+3. Synthesize the information to construct a comprehensive answer.
+4. **SMART IMAGE EMBEDDING**: When you reference information from an image, embed it directly in your response using: [IMAGE: <path_to_image>]
+   - Only embed images that are directly relevant to your answer (typically 1-3 max)
+   - Place images naturally in the flow of your text where they add most value
+   - Briefly explain what the image shows and why it's relevant
+5. Structure your response with appropriate markdown formatting (headers, bold, lists) for readability.
+6. If relevant data exists, present it as a clear Markdown table.
+7. End with a brief "Key Points" section summarizing the most important information.
+8. If the context doesn't contain the answer, state that clearly and don't make up information.
 
 **Chat History:**
 {chat_history}
@@ -295,173 +359,128 @@ conversational_qa_template = """You are an expert research assistant with deep a
 **Question:**
 {question}
 
-Please provide a comprehensive, well-structured response that thoroughly addresses the user's question. Remember to be selective with images - only embed the most relevant ones at the right moments in your explanation."""
+Provide a comprehensive, well-structured response that directly addresses the user's question."""
+
 conversational_qa_prompt = ChatPromptTemplate.from_template(conversational_qa_template)
 
 # --- MAIN CHAT INTERFACE ---
 
-# Initialize persistent storage for response data
-if 'response_data' not in st.session_state:
-    st.session_state.response_data = {}
-
 # Initialize chat
 if len(msgs.messages) == 0:
-    msgs.add_ai_message("Hello! I'm your advanced RAG assistant. How can I help you analyze your documents?")
+    msgs.add_ai_message("Hello! I'm your advanced RAG assistant. Upload your documents and I'll help you analyze them with both text and visual content. 🚀")
 
-# Display chat messages in main area
-for idx, msg in enumerate(msgs.messages):
+# Display chat messages
+for msg in msgs.messages:
     with st.chat_message(msg.type):
-        if msg.type == "ai":
-            # Check if this response has stored data
-            response_key = f"response_{idx}"
-            if response_key in st.session_state.response_data:
-                # Display stored sources for this specific response
-                stored_data = st.session_state.response_data[response_key]
-                with st.expander(f"📚 Sources ({len(stored_data['sources'])} sources, {len(stored_data['images'])} images)", expanded=False):
-                    for source in stored_data['sources']:
-                        st.markdown(f"**📄 {source['source']}** - Page {source['page']}")
-                        st.caption(source['content_preview'])
-                    
-                    if stored_data['images']:
-                        st.markdown("**🖼️ Images:**")
-                        cols = st.columns(min(3, len(stored_data['images'])))
-                        for i, img_path in enumerate(stored_data['images']):
-                            if os.path.exists(img_path):
-                                with cols[i % 3]:
-                                    st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
-                    
-                    # Stats
-                    col1, col2, col3, col4 = st.columns(4)
-                    with col1:
-                        st.metric("📄 Sources", len(stored_data['sources']))
-                    with col2:
-                        st.metric("🖼️ Images", len(stored_data['images']))
-                    with col3:
-                        st.metric("📝 Text", f"{stored_data['text_length']} chars")
-                    with col4:
-                        st.metric("🔍 OCR", "✅" if stored_data['has_ocr'] else "❌")
+        if msg.type == "ai" and "[IMAGE:" in msg.content:
+            # Parse and display response with embedded images
+            image_pattern = r'\[IMAGE:\s*(.*?)\]'
+            parts = re.split(image_pattern, msg.content)
             
-            # Parse and display the AI response with naturally embedded images
-            if "[IMAGE:" in msg.content:
-                self_images = st.session_state.response_data.get(response_key, {}).get('images', [])
-                image_pattern = r'\[IMAGE:\s*(.*?)\]'
-                parts = re.split(image_pattern, msg.content)
-                
-                for i, part in enumerate(parts):
-                    if i % 2 == 1:  # This is an image path
-                        image_path = part.strip()
-                        # Check if image exists and belongs to this response
-                        found_image = None
-                        
-                        if os.path.exists(image_path) and image_path in self_images:
-                            found_image = image_path
-                        else:
-                            # Try to find the image by filename
-                            for stored_img in self_images:
-                                if os.path.basename(stored_img) == os.path.basename(image_path) and os.path.exists(stored_img):
-                                    found_image = stored_img
-                                    break
-                        
-                        if found_image:
-                            # Embed image naturally without caption clutter
-                            st.image(found_image, width=500)
-                    else:  # This is text
-                        if part.strip():
-                            st.markdown(part)
-            else:
-                st.markdown(msg.content)
+            for i, part in enumerate(parts):
+                if i % 2 == 1:  # This is an image path
+                    image_path = part.strip()
+                    # Check if image exists in our accumulated images
+                    if image_path in st.session_state.all_images and os.path.exists(image_path):
+                        st.image(image_path, width=500, caption=f"📷 {os.path.basename(image_path)}")
+                    else:
+                        # Try to find by basename
+                        for stored_img in st.session_state.all_images:
+                            if os.path.basename(stored_img) == os.path.basename(image_path) and os.path.exists(stored_img):
+                                st.image(stored_img, width=500, caption=f"📷 {os.path.basename(stored_img)}")
+                                break
+                else:  # This is text
+                    if part.strip():
+                        st.markdown(part)
         else:
-            st.write(msg.content)
+            st.markdown(msg.content)
 
-# Chat input at the bottom
+# Chat input
 if user_prompt := st.chat_input("Ask a question about your documents..."):
     st.chat_message("user").write(user_prompt)
 
     with st.chat_message("ai"):
-        retrieved_docs = retriever.invoke(user_prompt)
+        # Apply rate limiting
+        check_rate_limit()
+        
+        # Show processing indicator
+        with st.spinner("🔍 Analyzing documents and retrieving relevant content..."):
+            retrieved_docs = retriever.invoke(user_prompt)
         
         context_text = format_docs(retrieved_docs)
-        current_response_images = []  # Only for this specific response
-        all_image_paths = []
+        current_images = []
         current_sources = []
+        all_image_paths = []
         
-        # Process retrieved documents for current response only
+        # Process retrieved documents
         for doc in retrieved_docs:
             source_info = {
                 "source": os.path.basename(_get_doc_metadata(doc, 'source', 'N/A')),
                 "page": _get_doc_metadata(doc, 'page', 0) + 1,
-                "content_preview": doc.page_content[:250] + "..."
+                "content_preview": doc.page_content[:200] + "..."
             }
             current_sources.append(source_info)
 
+            # Handle images
             image_paths_str = _get_doc_metadata(doc, 'image_paths', '')
             if image_paths_str:
                 image_paths_list = image_paths_str.split(';')
                 for img_path in image_paths_list:
-                    if os.path.exists(img_path) and img_path not in current_response_images:
-                        current_response_images.append(img_path)
+                    if os.path.exists(img_path) and img_path not in current_images:
+                        current_images.append(img_path)
                         all_image_paths.append(img_path)
         
-        # Store data for this specific response
-        response_index = len(msgs.messages)  # This will be the AI response index
-        response_key = f"response_{response_index}"
+        # Update conversation memory (accumulate across conversations)
+        for source in current_sources:
+            if source not in st.session_state.all_sources:
+                st.session_state.all_sources.append(source)
         
-        has_ocr = any(_get_doc_metadata(doc, 'has_ocr', False) for doc in retrieved_docs)
+        for img in current_images:
+            if img not in st.session_state.all_images:
+                st.session_state.all_images.append(img)
         
-        st.session_state.response_data[response_key] = {
-            'sources': current_sources,
-            'images': current_response_images,
-            'text_length': len(context_text),
-            'has_ocr': has_ocr,
-            'timestamp': st.session_state.get('current_time', 'unknown')
-        }
+        # Update stats
+        st.session_state.conversation_stats['total_queries'] += 1
+        st.session_state.conversation_stats['total_sources'] = len(st.session_state.all_sources)
+        st.session_state.conversation_stats['total_images'] = len(st.session_state.all_images)
+        st.session_state.conversation_stats['has_ocr'] = any(_get_doc_metadata(doc, 'has_ocr', False) for doc in retrieved_docs)
         
-        # Show sources for current response (this will be visible during generation)
-        with st.expander(f"📚 Current Response Sources ({len(current_sources)} sources, {len(current_response_images)} images)", expanded=True):
-            # Sources
-            if current_sources:
-                st.markdown("**📄 Document Sources:**")
-                for source in current_sources:
-                    st.markdown(f"• **{source['source']}** - Page {source['page']}")
-                    st.caption(f"Preview: _{source['content_preview']}_")
-            
-            # Images
-            if current_response_images:
-                st.markdown("**🖼️ Retrieved Images:**")
-                cols = st.columns(min(4, len(current_response_images)))
-                for i, img_path in enumerate(current_response_images):
-                    if os.path.exists(img_path):
-                        with cols[i % 4]:
-                            st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
-            
-            # Quick stats
-            st.markdown("**📊 Response Stats:**")
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("📄 Sources", len(current_sources))
-            with col2:
-                st.metric("🖼️ Images", len(current_response_images))
-            with col3:
-                st.metric("📝 Text", f"{len(context_text)} chars")
-            with col4:
-                st.metric("🔍 OCR", "✅" if has_ocr else "❌")
+        # Show current retrieval info
+        if current_sources or current_images:
+            with st.expander(f"📊 Retrieved for this query: {len(current_sources)} sources, {len(current_images)} images"):
+                if current_sources:
+                    for source in current_sources:
+                        st.caption(f"📄 {source['source']} - Page {source['page']}")
+                
+                if current_images:
+                    st.write("🖼️ Images found:")
+                    img_cols = st.columns(min(3, len(current_images)))
+                    for i, img_path in enumerate(current_images):
+                        if os.path.exists(img_path):
+                            with img_cols[i % 3]:
+                                st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
 
-        prompt_content_text = conversational_qa_prompt.format(
-            context=context_text,
-            chat_history=format_chat_history(msgs.messages),
-            image_paths="\n".join(all_image_paths),
-            question=user_prompt
-        )
-        
-        if not context_text.strip() and not current_response_images:
-            st.error("Could not extract any relevant content from the documents. Please try a different question.", icon="🤷")
+        if not context_text.strip() and not current_images:
+            st.error("Could not find relevant content for your question. Please try rephrasing or check if your documents contain the information you're looking for.", icon="🤷")
         else:
+            # Prepare multimodal prompt
+            prompt_content_text = conversational_qa_prompt.format(
+                context=context_text,
+                chat_history=format_chat_history(msgs.messages[-6:]),  # Limit history to avoid token limit
+                image_paths="\n".join(all_image_paths),
+                question=user_prompt
+            )
+            
             prompt_content = [{"type": "text", "text": prompt_content_text}]
             
-            # Only add images that are relevant to current response
-            for img_path in current_response_images:
+            # Add images to prompt (limit to avoid token issues)
+            for img_path in current_images[:5]:  # Limit to 5 images max
                 try:
                     img = Image.open(img_path)
+                    # Resize large images to save tokens
+                    if img.size[0] > 1024 or img.size[1] > 1024:
+                        img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+                    
                     buffered = BytesIO()
                     img_format = img.format if img.format else 'JPEG'
                     img.save(buffered, format=img_format)
@@ -474,30 +493,46 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
             multimodal_message = HumanMessage(content=prompt_content)
 
             try:
-                # Get response from model
-                response = llm.invoke([multimodal_message])
-                full_response = response.content
+                with st.spinner("🧠 Generating response..."):
+                    response = llm.invoke([multimodal_message])
+                    full_response = response.content
 
-                # Parse and render response with inline images (only current response images)
-                image_pattern = r'\[IMAGE:\s*(.*?)\]'
-                parts = re.split(image_pattern, full_response)
+                # Parse and display response with embedded images
+                if "[IMAGE:" in full_response:
+                    image_pattern = r'\[IMAGE:\s*(.*?)\]'
+                    parts = re.split(image_pattern, full_response)
 
-                for i, part in enumerate(parts):
-                    if i % 2 == 1:  # This is an image path
-                        image_path = part.strip()
-                        # Only show if image is in current response images
-                        if image_path in current_response_images and os.path.exists(image_path):
-                            st.image(image_path, width=400, caption=f"Referenced: {os.path.basename(image_path)}")
-                        else:
-                            st.warning(f"AI referenced an image not in current context: {os.path.basename(image_path)}")
-                    else:  # This is text part
-                        if part.strip():
-                            st.markdown(part)
+                    for i, part in enumerate(parts):
+                        if i % 2 == 1:  # This is an image path
+                            image_path = part.strip()
+                            # Check if image exists in current or accumulated images
+                            found_image = None
+                            
+                            if image_path in st.session_state.all_images and os.path.exists(image_path):
+                                found_image = image_path
+                            else:
+                                # Try to find by basename
+                                for stored_img in st.session_state.all_images:
+                                    if os.path.basename(stored_img) == os.path.basename(image_path) and os.path.exists(stored_img):
+                                        found_image = stored_img
+                                        break
+                            
+                            if found_image:
+                                st.image(found_image, width=500, caption=f"📷 {os.path.basename(found_image)}")
+                            else:
+                                st.warning(f"Referenced image not found: {os.path.basename(image_path)}")
+                        else:  # This is text
+                            if part.strip():
+                                st.markdown(part)
+                else:
+                    # No images in response, just show text
+                    st.markdown(full_response)
 
+                # Add to chat history
                 msgs.add_user_message(user_prompt)
                 msgs.add_ai_message(full_response)
                 
             except Exception as e:
-                st.error("An error occurred while generating the response. This might be due to API rate limits or other issues.", icon="🚨")
-                st.error(f"Details: {e}")
-
+                st.error("⚠️ An error occurred while generating the response. This might be due to API rate limits.", icon="🚨")
+                st.error(f"Error details: {str(e)}")
+                st.info("💡 Please wait a moment and try again. The app includes rate limiting to prevent this issue.")
