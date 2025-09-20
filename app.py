@@ -24,7 +24,7 @@ import time
 import random
 
 # LangChain and AI components
-from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_community.chat_message_histories import StreamlitChatMessageHistory
 from langchain_community.document_loaders import (
@@ -35,6 +35,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.messages import HumanMessage
+from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # Other libraries
 from chromadb.config import Settings
@@ -194,12 +195,38 @@ def configure_retriever(uploaded_files, temp_dir_path):
         st.warning("No text content could be extracted. Please check if files contain readable text.")
         return None
 
-    api_key = st.secrets.get("GOOGLE_API_KEY")
-    if not api_key:
-        st.error("Google API Key not found in Streamlit secrets. Please add it.")
+    # Use Hugging Face embeddings (free and local)
+    try:
+        # Try multiple embedding models for better compatibility
+        embedding_models = [
+            "sentence-transformers/all-MiniLM-L6-v2",  # Fast and efficient
+            "sentence-transformers/all-mpnet-base-v2",  # Higher quality
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # Multilingual support
+        ]
+        
+        embeddings_model = None
+        for model_name in embedding_models:
+            try:
+                st.info(f"🔄 Loading embedding model: {model_name}")
+                embeddings_model = HuggingFaceEmbeddings(
+                    model_name=model_name,
+                    model_kwargs={'device': 'cpu'},  # Use CPU to avoid GPU memory issues
+                    encode_kwargs={'normalize_embeddings': True}
+                )
+                st.success(f"✅ Successfully loaded: {model_name}")
+                break
+            except Exception as e:
+                st.warning(f"⚠️ Failed to load {model_name}: {e}")
+                continue
+        
+        if not embeddings_model:
+            st.error("❌ Could not load any embedding model. Please check your internet connection.")
+            st.stop()
+            
+    except Exception as e:
+        st.error(f"Error initializing embeddings: {e}")
         st.stop()
-
-    embeddings_model = GoogleGenerativeAIEmbeddings(model="models/embedding-001", google_api_key=api_key)
+    
     chroma_settings = Settings(anonymized_telemetry=False)
 
     try:
@@ -229,10 +256,12 @@ if 'conversation_stats' not in st.session_state:
         'has_ocr': False
     }
 
+# Check for Google API key (only needed for LLM, not embeddings)
 google_api_key = st.secrets.get("GOOGLE_API_KEY")
 if not google_api_key:
-    st.info("Please add your Google API key to the Streamlit secrets to continue.")
-    st.stop()
+    st.warning("⚠️ Google API key not found. You can still use the app for document analysis, but AI responses will be limited.")
+    st.info("💡 To enable full AI responses, add your Google API key to Streamlit secrets.")
+    # Don't stop the app, just show warning
 
 # --- SIDEBAR AND FILE UPLOAD ---
 with st.sidebar:
@@ -298,7 +327,11 @@ with st.sidebar:
 
     st.markdown("---")
     st.info("💡 Images are embedded directly in responses where relevant", icon="ℹ️")
-    st.caption("⚡ Rate limiting with auto-retry is active.")
+    st.caption("⚡ Using local Hugging Face embeddings (no API limits!)")
+    if llm:
+        st.caption("🤖 AI responses enabled with Google Gemini")
+    else:
+        st.caption("📄 Document search only (add Google API key for AI responses)")
 
 if not uploaded_files:
     st.info("Please upload your documents in the sidebar to start chatting.")
@@ -311,18 +344,27 @@ if not retriever:
 msgs = StreamlitChatMessageHistory(key="langchain_messages")
 
 # --- LLM AND PROMPT SETUP ---
-safety_settings = {
-    HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-    HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-}
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash-latest",
-    temperature=0.2,
-    google_api_key=google_api_key,
-    safety_settings=safety_settings,
-)
+llm = None
+if google_api_key:
+    try:
+        safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-1.5-flash-latest",
+            temperature=0.2,
+            google_api_key=google_api_key,
+            safety_settings=safety_settings,
+        )
+        st.success("✅ AI model loaded successfully!")
+    except Exception as e:
+        st.error(f"❌ Failed to load AI model: {e}")
+        llm = None
+else:
+    st.info("ℹ️ AI responses disabled - only document search available")
 
 conversational_qa_template = """You are an expert research assistant. Your goal is to provide clear, accurate, and well-formatted answers based on the provided context, which may include text and images.
 Instructions:
@@ -355,7 +397,10 @@ conversational_qa_prompt = ChatPromptTemplate.from_template(conversational_qa_te
 
 # --- MAIN CHAT INTERFACE ---
 if len(msgs.messages) == 0:
-    msgs.add_ai_message("Hello! I'm your advanced RAG assistant. Upload documents and I'll analyze them. 🚀")
+    if llm:
+        msgs.add_ai_message("Hello! I'm your advanced RAG assistant with AI-powered responses. Upload documents and I'll analyze them. 🚀")
+    else:
+        msgs.add_ai_message("Hello! I'm your document search assistant. Upload documents and I'll help you find relevant content. (AI responses disabled - add Google API key for full features) 📄")
 
 for msg in msgs.messages:
     with st.chat_message(msg.type):
@@ -437,75 +482,95 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
         if not context_text.strip() and not current_images:
             st.error("Could not find relevant content. Please try rephrasing.", icon="🤷")
         else:
-            prompt_text = conversational_qa_prompt.format(
-                context=context_text,
-                chat_history=format_chat_history(msgs.messages[-6:]),
-                image_paths="\n".join(all_image_paths),
-                question=user_prompt
-            )
-            
-            prompt_content = [{"type": "text", "text": prompt_text}]
-            for img_path in current_images[:5]:
-                try:
-                    img = Image.open(img_path)
-                    if img.size[0] > 1024 or img.size[1] > 1024:
-                        img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
-                    buffered = BytesIO()
-                    img_format = img.format if img.format else 'JPEG'
-                    img.save(buffered, format=img_format)
-                    data_url = f"data:image/{img_format.lower()};base64,{base64.b64encode(buffered.getvalue()).decode()}"
-                    prompt_content.append({"type": "image_url", "image_url": {"url": data_url}})
-                except Exception as e:
-                    st.warning(f"Could not process image {os.path.basename(img_path)}: {e}")
-
-            multimodal_message = HumanMessage(content=prompt_content)
-
-            # --- LLM INVOCATION WITH EXPONENTIAL BACKOFF ---
-            max_retries = 5
-            initial_backoff = 2  # seconds
-            full_response = None
-            
-            for attempt in range(max_retries):
-                try:
-                    with st.spinner(f"🧠 Generating response... (Attempt {attempt + 1}/{max_retries})"):
-                        check_rate_limit() # Proactive delay
-                        response = llm.invoke([multimodal_message])
-                        full_response = response.content
-                        break  # Success, exit loop
-                except Exception as e:
-                    error_str = str(e).lower()
-                    if "429" in error_str or "rate limit" in error_str:
-                        if attempt < max_retries - 1:
-                            wait_time = initial_backoff * (2 ** attempt) + random.uniform(0, 1)
-                            st.warning(f"Rate limit hit. Retrying in {wait_time:.1f}s...", icon="⏳")
-                            time.sleep(wait_time)
-                        else:
-                            st.error("API rate limit exceeded after multiple retries.", icon="🚨")
-                            st.error(f"Final error: {e}")
-                            break
-                    else:
-                        st.error(f"An unexpected error occurred: {e}", icon="🚨")
-                        break
-            
-            # --- DISPLAY RESPONSE IF SUCCESSFUL ---
-            if full_response:
-                # Same display logic as before
-                if "[IMAGE:" in full_response:
-                    image_pattern = r'\[IMAGE:\s*(.*?)\]'
-                    parts = re.split(image_pattern, full_response)
-                    for i, part in enumerate(parts):
-                        if i % 2 == 1:
-                            image_path = part.strip()
-                            found_image = next((p for p in st.session_state.all_images if os.path.basename(p) == os.path.basename(image_path)), None)
-                            if found_image and os.path.exists(found_image):
-                                st.image(found_image, width=500, caption=f"📷 {os.path.basename(found_image)}")
-                            else:
-                                st.warning(f"Referenced image not found: {os.path.basename(image_path)}")
-                        elif part.strip():
-                            st.markdown(part)
-                else:
-                    st.markdown(full_response)
+            # Check if LLM is available
+            if llm is None:
+                # Show document search results without AI processing
+                st.info("📄 **Document Search Results** (AI responses disabled)")
+                st.markdown("**Found relevant content:**")
+                st.markdown(context_text)
                 
+                if current_images:
+                    st.markdown("**Images found:**")
+                    img_cols = st.columns(min(3, len(current_images)))
+                    for i, img_path in enumerate(current_images):
+                        with img_cols[i % 3]: 
+                            st.image(img_path, use_container_width=True)
+                
+                # Add to chat history
                 msgs.add_user_message(user_prompt)
-                msgs.add_ai_message(full_response)
+                msgs.add_ai_message(f"Document search results:\n\n{context_text}")
+                
+            else:
+                # Full AI processing with LLM
+                prompt_text = conversational_qa_prompt.format(
+                    context=context_text,
+                    chat_history=format_chat_history(msgs.messages[-6:]),
+                    image_paths="\n".join(all_image_paths),
+                    question=user_prompt
+                )
+                
+                prompt_content = [{"type": "text", "text": prompt_text}]
+                for img_path in current_images[:5]:
+                    try:
+                        img = Image.open(img_path)
+                        if img.size[0] > 1024 or img.size[1] > 1024:
+                            img.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+                        buffered = BytesIO()
+                        img_format = img.format if img.format else 'JPEG'
+                        img.save(buffered, format=img_format)
+                        data_url = f"data:image/{img_format.lower()};base64,{base64.b64encode(buffered.getvalue()).decode()}"
+                        prompt_content.append({"type": "image_url", "image_url": {"url": data_url}})
+                    except Exception as e:
+                        st.warning(f"Could not process image {os.path.basename(img_path)}: {e}")
+
+                multimodal_message = HumanMessage(content=prompt_content)
+
+                # --- LLM INVOCATION WITH EXPONENTIAL BACKOFF ---
+                max_retries = 5
+                initial_backoff = 2  # seconds
+                full_response = None
+                
+                for attempt in range(max_retries):
+                    try:
+                        with st.spinner(f"🧠 Generating response... (Attempt {attempt + 1}/{max_retries})"):
+                            check_rate_limit() # Proactive delay
+                            response = llm.invoke([multimodal_message])
+                            full_response = response.content
+                            break  # Success, exit loop
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        if "429" in error_str or "rate limit" in error_str:
+                            if attempt < max_retries - 1:
+                                wait_time = initial_backoff * (2 ** attempt) + random.uniform(0, 1)
+                                st.warning(f"Rate limit hit. Retrying in {wait_time:.1f}s...", icon="⏳")
+                                time.sleep(wait_time)
+                            else:
+                                st.error("API rate limit exceeded after multiple retries.", icon="🚨")
+                                st.error(f"Final error: {e}")
+                                break
+                        else:
+                            st.error(f"An unexpected error occurred: {e}", icon="🚨")
+                            break
+                
+                # --- DISPLAY RESPONSE IF SUCCESSFUL ---
+                if full_response:
+                    # Same display logic as before
+                    if "[IMAGE:" in full_response:
+                        image_pattern = r'\[IMAGE:\s*(.*?)\]'
+                        parts = re.split(image_pattern, full_response)
+                        for i, part in enumerate(parts):
+                            if i % 2 == 1:
+                                image_path = part.strip()
+                                found_image = next((p for p in st.session_state.all_images if os.path.basename(p) == os.path.basename(image_path)), None)
+                                if found_image and os.path.exists(found_image):
+                                    st.image(found_image, width=500, caption=f"📷 {os.path.basename(found_image)}")
+                                else:
+                                    st.warning(f"Referenced image not found: {os.path.basename(image_path)}")
+                            elif part.strip():
+                                st.markdown(part)
+                    else:
+                        st.markdown(full_response)
+                    
+                    msgs.add_user_message(user_prompt)
+                    msgs.add_ai_message(full_response)
 
