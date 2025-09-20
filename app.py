@@ -263,6 +263,29 @@ if not google_api_key:
     st.info("💡 To enable full AI responses, add your Google API key to Streamlit secrets.")
     # Don't stop the app, just show warning
 
+# --- LLM AND PROMPT SETUP ---
+llm = None
+if google_api_key:
+    try:
+        safety_settings = {
+            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+        }
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-1.5-flash-latest",
+            temperature=0.2,
+            google_api_key=google_api_key,
+            safety_settings=safety_settings,
+        )
+        st.success("✅ AI model loaded successfully!")
+    except Exception as e:
+        st.error(f"❌ Failed to load AI model: {e}")
+        llm = None
+else:
+    st.info("ℹ️ AI responses disabled - only document search available")
+
 # --- SIDEBAR AND FILE UPLOAD ---
 with st.sidebar:
     st.header("📁 Upload Your Documents")
@@ -342,29 +365,6 @@ if not retriever:
     st.stop()
 
 msgs = StreamlitChatMessageHistory(key="langchain_messages")
-
-# --- LLM AND PROMPT SETUP ---
-llm = None
-if google_api_key:
-    try:
-        safety_settings = {
-            HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
-            HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
-        }
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash-latest",
-            temperature=0.2,
-            google_api_key=google_api_key,
-            safety_settings=safety_settings,
-        )
-        st.success("✅ AI model loaded successfully!")
-    except Exception as e:
-        st.error(f"❌ Failed to load AI model: {e}")
-        llm = None
-else:
-    st.info("ℹ️ AI responses disabled - only document search available")
 
 conversational_qa_template = """You are an expert research assistant. Your goal is to provide clear, accurate, and well-formatted answers based on the provided context, which may include text and images.
 Instructions:
