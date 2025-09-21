@@ -11,10 +11,11 @@ unstructured
 beautifulsoup4
 lxml
 Pillow
-pysqlite3-binary
+
 python-pptx
 pytesseract
 pdfminer
 sentence-transformers
 torch
 transformers
+
