@@ -367,28 +367,28 @@ conversational_qa_template = """You are an expert research assistant with advanc
         </div>
         <script>
           const ctx = document.getElementById('myChart').getContext('2d');
-          new Chart(ctx, {
+          new Chart(ctx, {{
             type: 'bar', // or 'line', 'pie', etc.
-            data: {
+            data: {{
               labels: ['Label 1', 'Label 2', 'Label 3'],
-              datasets: [{
+              datasets: [{{
                 label: 'Dataset Label',
                 data: [10, 20, 30],
                 backgroundColor: 'rgba(75, 192, 192, 0.2)',
                 borderColor: 'rgba(75, 192, 192, 1)',
                 borderWidth: 1
-              }]
-            },
-            options: {
+              }}]
+            }},
+            options: {{
               responsive: true,
               maintainAspectRatio: false,
-              scales: {
-                y: {
+              scales: {{
+                y: {{
                   beginAtZero: true
-                }
-              }
-            }
-          });
+                }}
+              }}
+            }}
+          }});
         </script>
       </body>
       </html>
