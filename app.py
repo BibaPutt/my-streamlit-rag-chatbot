@@ -11,6 +11,7 @@ except ImportError:
 # =====================================================================
 
 import streamlit as st
+import streamlit.components.v1 as components
 import os
 import tempfile
 import pandas as pd
@@ -54,6 +55,31 @@ def format_chat_history(chat_history):
 def _get_doc_metadata(doc, key, default=None):
     """Safely retrieves a key from a document's metadata."""
     return doc.metadata.get(key, default)
+
+def display_message_with_html(message_content):
+    """
+    Renders a message, checking for HTML content to display in a webview.
+    """
+    html_pattern = r"```html(.*?)```"
+    html_match = re.search(html_pattern, message_content, re.DOTALL)
+
+    # Display text parts before the HTML block
+    pre_html_text = re.split(html_pattern, message_content, flags=re.DOTALL)[0]
+    if pre_html_text.strip():
+        st.markdown(pre_html_text)
+
+    if html_match:
+        html_code = html_match.group(1).strip()
+        try:
+            # Render the HTML component
+            components.html(html_code, height=450, scrolling=True)
+        except Exception as e:
+            st.error(f"Failed to render HTML: {e}")
+
+    # Display text parts after the HTML block
+    post_html_text_parts = re.split(html_pattern, message_content, flags=re.DOTALL)
+    if len(post_html_text_parts) > 2 and post_html_text_parts[2].strip():
+        st.markdown(post_html_text_parts[2])
 
 # OCR function for image-heavy PDFs
 def simple_ocr_extraction(image_path):
@@ -371,6 +397,22 @@ Instructions:
 - Analyze the user's question and the provided chat history.
 - Carefully examine the context, including any text and images. The context provided under 'Context:' is the most relevant information.
 - Synthesize the information to construct a comprehensive answer.
+- **HTML Graph Generation**: If the user asks for a chart, graph, or visual representation of data, and the context contains relevant data, generate a self-contained HTML file using a library like Plotly, Chart.js, or D3.js. Enclose the HTML code in a markdown block like this:
+  ```html
+  <!DOCTYPE html>
+  <html>
+  <head>
+    <title>Chart</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  </head>
+  <body>
+    <canvas id="myChart" width="400" height="200"></canvas>
+    <script>
+      // Your Chart.js code here
+    </script>
+  </body>
+  </html>
+  ```
 - SMART IMAGE EMBEDDING: When you reference information from an image, embed it directly in your response using: [IMAGE: <path_to_image>]
 - Only embed images that are directly relevant to your answer (typically 1-3 max)
 - Place images naturally in the flow of your text where they add most value
@@ -427,7 +469,7 @@ for msg in msgs.messages:
                     if part.strip():
                         st.markdown(part)
         else:
-            st.markdown(msg.content)
+            display_message_with_html(msg.content)
 
 if user_prompt := st.chat_input("Ask a question about your documents..."):
     st.chat_message("user").write(user_prompt)
@@ -569,7 +611,7 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                             elif part.strip():
                                 st.markdown(part)
                     else:
-                        st.markdown(full_response)
+                        display_message_with_html(full_response)
                     
                     msgs.add_user_message(user_prompt)
                     msgs.add_ai_message(full_response)
