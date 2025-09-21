@@ -322,9 +322,6 @@ with st.sidebar:
         st.cache_resource.clear()
         st.rerun()
 
-    st.markdown("---")
-    st.info("💡 Images are embedded directly in responses where relevant", icon="ℹ️")
-    st.caption("⚡ Using local Hugging Face embeddings (no API limits!)")
     if llm:
         st.caption("🤖 AI responses enabled with Google Gemini")
     else:
@@ -594,4 +591,5 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                     
                     msgs.add_user_message(user_prompt)
                     msgs.add_ai_message(full_response)
+
 
