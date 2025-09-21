@@ -211,7 +211,8 @@ def configure_retriever(uploaded_files, temp_dir_path):
         st.warning("No documents were successfully loaded. Please upload supported files.")
         return None
 
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=4000, chunk_overlap=250)
+    st.info("Splitting documents into smaller chunks for analysis...")
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=200)
     doc_chunks = text_splitter.split_documents(docs)
 
     # Filter out empty chunks that could cause embedding errors
@@ -221,36 +222,20 @@ def configure_retriever(uploaded_files, temp_dir_path):
         st.warning("No text content could be extracted. Please check if files contain readable text.")
         return None
 
-    # Use Hugging Face embeddings (free and local)
+    # Use a specific, efficient Hugging Face embedding model
+    embedding_model_name = "sentence-transformers/all-MiniLM-L6-v2"
+    st.info(f"🔄 Loading embedding model: {embedding_model_name}. This is a one-time process for the uploaded documents and may take a few minutes.")
+    
     try:
-        # Try multiple embedding models for better compatibility
-        embedding_models = [
-            "sentence-transformers/all-MiniLM-L6-v2",  # Fast and efficient
-            "sentence-transformers/all-mpnet-base-v2",  # Higher quality
-            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"  # Multilingual support
-        ]
-        
-        embeddings_model = None
-        for model_name in embedding_models:
-            try:
-                st.info(f"🔄 Loading embedding model: {model_name}")
-                embeddings_model = HuggingFaceEmbeddings(
-                    model_name=model_name,
-                    model_kwargs={'device': 'cpu'},  # Use CPU to avoid GPU memory issues
-                    encode_kwargs={'normalize_embeddings': True}
-                )
-                st.success(f"✅ Successfully loaded: {model_name}")
-                break
-            except Exception as e:
-                st.warning(f"⚠️ Failed to load {model_name}: {e}")
-                continue
-        
-        if not embeddings_model:
-            st.error("❌ Could not load any embedding model. Please check your internet connection.")
-            st.stop()
-            
+        embeddings_model = HuggingFaceEmbeddings(
+            model_name=embedding_model_name,
+            model_kwargs={'device': 'cpu'},  # Use CPU for broader compatibility
+            encode_kwargs={'normalize_embeddings': True}
+        )
+        st.success("✅ Embedding model loaded.")
     except Exception as e:
-        st.error(f"Error initializing embeddings: {e}")
+        st.error(f"❌ Failed to load embedding model: {e}")
+        st.error("Please check your internet connection or try again later.")
         st.stop()
     
     chroma_settings = Settings(anonymized_telemetry=False)
@@ -269,7 +254,10 @@ st.title("🧠 Advanced Multimodal RAG Assistant")
 
 # Initialize session state variables
 if 'temp_dir' not in st.session_state:
-    st.session_state.temp_dir = tempfile.mkdtemp()
+    # Create a fixed temporary directory
+    temp_dir_path = os.path.join(os.getcwd(), "temp_data")
+    os.makedirs(temp_dir_path, exist_ok=True)
+    st.session_state.temp_dir = temp_dir_path
 if 'all_sources' not in st.session_state:
     st.session_state.all_sources = []
 if 'all_images' not in st.session_state:
@@ -335,46 +323,6 @@ with st.sidebar:
         st.rerun()
 
     st.markdown("---")
-    # Conversation Memory Panel
-    st.subheader("💭 Conversation Memory")
-    stats = st.session_state.conversation_stats
-
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("🔍 Queries", stats['total_queries'])
-        st.metric("📄 Sources", stats['total_sources'])
-    with col2:
-        st.metric("🖼️ Images", stats['total_images'])
-        st.metric("🔤 OCR", "✅" if stats['has_ocr'] else "❌")
-
-    # Show accumulated sources
-    if st.session_state.all_sources:
-        with st.expander(f"📚 All Sources ({len(st.session_state.all_sources)})"):
-            unique_sources = {}
-            for source in st.session_state.all_sources:
-                key = f"{source['source']}_p{source['page']}"
-                if key not in unique_sources:
-                    unique_sources[key] = source
-            
-            for source in unique_sources.values():
-                st.caption(f"📄 {source['source']} - Page {source['page']}")
-
-    # Show accumulated images
-    if st.session_state.all_images:
-        with st.expander(f"🖼️ All Images ({len(st.session_state.all_images)})"):
-            num_images = len(st.session_state.all_images)
-            cols_per_row = 2
-            
-            for i in range(0, num_images, cols_per_row):
-                cols = st.columns(cols_per_row)
-                for j, col in enumerate(cols):
-                    if i + j < num_images:
-                        img_path = st.session_state.all_images[i + j]
-                        if os.path.exists(img_path):
-                            with col:
-                                st.image(img_path, caption=os.path.basename(img_path), use_container_width=True)
-
-    st.markdown("---")
     st.info("💡 Images are embedded directly in responses where relevant", icon="ℹ️")
     st.caption("⚡ Using local Hugging Face embeddings (no API limits!)")
     if llm:
@@ -392,49 +340,80 @@ if not retriever:
 
 msgs = StreamlitChatMessageHistory(key="langchain_messages")
 
-conversational_qa_template = """You are an expert research assistant. Your goal is to provide clear, accurate, and well-formatted answers based on the provided context, which may include text and images.
-Instructions:
-- Analyze the user's question and the provided chat history.
-- Carefully examine the context, including any text and images. The context provided under 'Context:' is the most relevant information.
-- Synthesize the information to construct a comprehensive answer.
-- **HTML Graph Generation**: If the user asks for a chart, graph, or visual representation of data, and the context contains relevant data, generate a self-contained HTML file using a library like Plotly, Chart.js, or D3.js. Enclose the HTML code in a markdown block like this:
-  ```html
-  <!DOCTYPE html>
-  <html>
-  <head>
-    <title>Chart</title>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-  </head>
-  <body>
-    <canvas id="myChart" width="400" height="200"></canvas>
-    <script>
-      // Your Chart.js code here
-    </script>
-  </body>
-  </html>
-  ```
-- SMART IMAGE EMBEDDING: When you reference information from an image, embed it directly in your response using: [IMAGE: <path_to_image>]
-- Only embed images that are directly relevant to your answer (typically 1-3 max)
-- Place images naturally in the flow of your text where they add most value
-- Briefly explain what the image shows and why it's relevant
-- Structure your response with appropriate markdown formatting (headers, bold, lists) for readability.
-- If relevant data exists, present it as a clear Markdown table.
-- End with a brief "Key Points" section summarizing the most important information.
-- If the context doesn't contain the answer, state that clearly and don't make up information.
+conversational_qa_template = """You are an expert research assistant with advanced analytical capabilities. Your goal is to provide clear, accurate, and insightful answers based on the provided context.
 
-Chat History:
+**Core Instructions:**
+1.  **Analyze and Synthesize:** Carefully analyze the user's question, chat history, and the provided context (text and images). Synthesize this information to construct a comprehensive and well-structured response.
+2.  **Data Extraction from Text:** You can extract data for analysis even from unstructured text. For example, if the text says "sales increased from 500 to 800 in the last quarter", you can identify these as data points for a chart.
+3.  **Markdown Formatting:** Structure your response with appropriate markdown (headers, bold, lists) for readability. If the data is tabular, present it as a clear Markdown table.
+
+**Visualization Instructions:**
+- **When to Generate Charts:** If the user asks for a chart, graph, or visual analysis, and you can identify relevant data (from tables or text), you MUST generate a chart.
+- **How to Generate Charts:**
+    - Generate a **single, self-contained HTML file** for the chart.
+    - Use **Chart.js** (from `https://cdn.jsdelivr.net/npm/chart.js`) for creating the chart. This is the only library supported.
+    - Your HTML code MUST be enclosed in a markdown block: ```html ... ```
+    - **Example HTML Structure:**
+      ```html
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Analysis Chart</title>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+      </head>
+      <body>
+        <div style="width: 90%; margin: auto;">
+          <canvas id="myChart"></canvas>
+        </div>
+        <script>
+          const ctx = document.getElementById('myChart').getContext('2d');
+          new Chart(ctx, {
+            type: 'bar', // or 'line', 'pie', etc.
+            data: {
+              labels: ['Label 1', 'Label 2', 'Label 3'],
+              datasets: [{
+                label: 'Dataset Label',
+                data: [10, 20, 30],
+                backgroundColor: 'rgba(75, 192, 192, 0.2)',
+                borderColor: 'rgba(75, 192, 192, 1)',
+                borderWidth: 1
+              }]
+            },
+            options: {
+              responsive: true,
+              maintainAspectRatio: false,
+              scales: {
+                y: {
+                  beginAtZero: true
+                }
+              }
+            }
+          });
+        </script>
+      </body>
+      </html>
+      ```
+- **Image Embedding:**
+    - If you reference information from a source image, embed it in your response using `[IMAGE: <path_to_image>]`.
+    - Only embed relevant images (1-3 max) and briefly explain their relevance.
+
+**Concluding the Response:**
+- End your response with a "Key Points" summary.
+- If the context does not contain the answer, state that clearly. Do not invent information.
+
+**Chat History:**
 {chat_history}
 
-Context:
+**Context:**
 {context}
 
-Available Image Paths:
+**Available Image Paths:**
 {image_paths}
 
-Question:
+**Question:**
 {question}
 
-Provide a comprehensive, well-structured response that directly addresses the user's question."""
+Provide a comprehensive, well-structured, and insightful response."""
 conversational_qa_prompt = ChatPromptTemplate.from_template(conversational_qa_template)
 
 # --- MAIN CHAT INTERFACE ---
