@@ -288,7 +288,7 @@ if google_api_key:
             HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
         }
         llm = ChatGoogleGenerativeAI(
-            model="gemini-1.5-flash-latest",
+            model="gemini-2.5-flash-lite",
             temperature=0.2,
             google_api_key=google_api_key,
             safety_settings=safety_settings,
@@ -591,5 +591,6 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                     
                     msgs.add_user_message(user_prompt)
                     msgs.add_ai_message(full_response)
+
 
 
