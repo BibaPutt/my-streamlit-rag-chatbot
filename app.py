@@ -40,18 +40,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # Other libraries
 from chromadb.config import Settings
-from google.genai.types import HarmCategory, HarmBlockThreshold
-
-try:
-    import docx
-    from pptx import Presentation
-    import requests
-    from bs4 import BeautifulSoup
-    import docx2txt
-    from streamlit_mic_recorder import mic_recorder
-    import speech_recognition as sr
-except ImportError:
-    st.error("Please install the required packages: `pip install python-docx python-pptx beautifulsoup4 requests docx2txt streamlit-mic-recorder SpeechRecognition`")
+from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 # --- UTILITY FUNCTIONS ---
 
@@ -69,24 +58,28 @@ def _get_doc_metadata(doc, key, default=None):
 
 def display_message_with_html(message_content):
     """
-    Renders a message, checking for multiple HTML blocks to display in webviews.
+    Renders a message, checking for HTML content to display in a webview.
     """
-    # Split the message by the html blocks
-    parts = re.split(r"(```html.*?```)", message_content, flags=re.DOTALL)
-    
-    for part in parts:
-        if part.startswith("```html"):
-            # This is an HTML block
-            html_code = part.strip().replace("```html", "").replace("```", "")
-            try:
-                # Render the HTML component with increased height
-                components.html(html_code, height=550, scrolling=True)
-            except Exception as e:
-                st.error(f"Failed to render HTML: {e}")
-        else:
-            # This is a regular text part
-            if part.strip():
-                st.markdown(part)
+    html_pattern = r"```html(.*?)```"
+    html_match = re.search(html_pattern, message_content, re.DOTALL)
+
+    # Display text parts before the HTML block
+    pre_html_text = re.split(html_pattern, message_content, flags=re.DOTALL)[0]
+    if pre_html_text.strip():
+        st.markdown(pre_html_text)
+
+    if html_match:
+        html_code = html_match.group(1).strip()
+        try:
+            # Render the HTML component
+            components.html(html_code, height=450, scrolling=True)
+        except Exception as e:
+            st.error(f"Failed to render HTML: {e}")
+
+    # Display text parts after the HTML block
+    post_html_text_parts = re.split(html_pattern, message_content, flags=re.DOTALL)
+    if len(post_html_text_parts) > 2 and post_html_text_parts[2].strip():
+        st.markdown(post_html_text_parts[2])
 
 # OCR function for image-heavy PDFs
 def simple_ocr_extraction(image_path):
@@ -100,142 +93,6 @@ def simple_ocr_extraction(image_path):
     except Exception as e:
         # If OCR fails, return empty string
         return ""
-
-def load_docx_with_images(file_path, temp_dir_path):
-    """
-    Loads a DOCX file, extracts text and images.
-    """
-    documents = []
-    image_save_dir = os.path.join(temp_dir_path, "images", os.path.splitext(os.path.basename(file_path))[0])
-    os.makedirs(image_save_dir, exist_ok=True)
-    
-    # Extract text
-    text = docx2txt.process(file_path)
-    
-    # Extract images
-    image_paths = []
-    doc = docx.Document(file_path)
-    for i, rel in enumerate(doc.part.rels.values()):
-        if "image" in rel.target_ref:
-            img_data = rel.target_part.blob
-            img_pil = Image.open(BytesIO(img_data))
-            if img_pil.width < 100 or img_pil.height < 100:
-                continue
-
-            img_ext = img_pil.format.lower()
-            image_filename = f"image{i+1}.{img_ext}"
-            image_path = os.path.join(image_save_dir, image_filename)
-            with open(image_path, "wb") as img_file:
-                img_file.write(img_data)
-            image_paths.append(image_path)
-
-    image_paths_str = ";".join(image_paths)
-    documents.append(Document(
-        page_content=text,
-        metadata={
-            'source': os.path.basename(file_path),
-            'image_paths': image_paths_str,
-        }
-    ))
-    return documents
-
-def load_pptx_with_images(file_path, temp_dir_path):
-    """
-    Loads a PPTX file, extracts text and images.
-    """
-    documents = []
-    image_save_dir = os.path.join(temp_dir_path, "images", os.path.splitext(os.path.basename(file_path))[0])
-    os.makedirs(image_save_dir, exist_ok=True)
-    
-    prs = Presentation(file_path)
-    for i, slide in enumerate(prs.slides):
-        text = ""
-        for shape in slide.shapes:
-            if hasattr(shape, "text"):
-                text += shape.text + "\n"
-        
-        image_paths = []
-        for shape in slide.shapes:
-            if hasattr(shape, "image"):
-                img = shape.image
-                img_data = img.blob
-                img_pil = Image.open(BytesIO(img_data))
-                if img_pil.width < 100 or img_pil.height < 100:
-                    continue
-                
-                img_ext = img.ext
-                image_filename = f"slide{i+1}_img{len(image_paths)+1}.{img_ext}"
-                image_path = os.path.join(image_save_dir, image_filename)
-                with open(image_path, "wb") as img_file:
-                    img_file.write(img_data)
-                image_paths.append(image_path)
-
-        image_paths_str = ";".join(image_paths)
-        documents.append(Document(
-            page_content=text,
-            metadata={
-                'source': os.path.basename(file_path),
-                'page': i,
-                'image_paths': image_paths_str,
-            }
-        ))
-    return documents
-
-def load_html_with_images(file_path, temp_dir_path):
-    """
-    Loads an HTML file, extracts text and images.
-    """
-    documents = []
-    image_save_dir = os.path.join(temp_dir_path, "images", os.path.splitext(os.path.basename(file_path))[0])
-    os.makedirs(image_save_dir, exist_ok=True)
-
-    with open(file_path, 'r', encoding='utf-8') as f:
-        html_content = f.read()
-    
-    soup = BeautifulSoup(html_content, 'html.parser')
-    text = soup.get_text()
-
-    image_paths = []
-    for i, img_tag in enumerate(soup.find_all('img')):
-        img_url = img_tag.get('src')
-        if not img_url:
-            continue
-        try:
-            if img_url.startswith('data:image'):
-                # Handle base64 encoded images
-                header, encoded = img_url.split(',', 1)
-                img_data = base64.b64decode(encoded)
-                img_pil = Image.open(BytesIO(img_data))
-                img_ext = img_pil.format.lower()
-            else:
-                # Handle image URLs
-                response = requests.get(img_url, stream=True)
-                response.raise_for_status()
-                img_data = response.content
-                img_pil = Image.open(BytesIO(img_data))
-                img_ext = img_pil.format.lower()
-
-            if img_pil.width < 100 or img_pil.height < 100:
-                continue
-
-            image_filename = f"image{i+1}.{img_ext}"
-            image_path = os.path.join(image_save_dir, image_filename)
-            with open(image_path, "wb") as img_file:
-                img_file.write(img_data)
-            image_paths.append(image_path)
-        except Exception as e:
-            st.warning(f"Could not download image {img_url}: {e}")
-
-
-    image_paths_str = ";".join(image_paths)
-    documents.append(Document(
-        page_content=text,
-        metadata={
-            'source': os.path.basename(file_path),
-            'image_paths': image_paths_str,
-        }
-    ))
-    return documents
 
 # Enhanced PDF loading with OCR fallback
 def load_pdf_with_images(file_path, temp_dir_path):
@@ -259,15 +116,6 @@ def load_pdf_with_images(file_path, temp_dir_path):
             base_image = pdf_document.extract_image(xref)
             image_bytes = base_image["image"]
             image_ext = base_image["ext"]
-            
-            # Check image size to filter out small icons
-            try:
-                img_pil = Image.open(BytesIO(image_bytes))
-                if img_pil.width < 100 or img_pil.height < 100:
-                    continue # Skip small images
-            except Exception:
-                continue # Skip if image can't be opened
-
             image_filename = f"page{page_num+1}_img{img_index+1}.{image_ext}"
             image_path = os.path.join(image_save_dir, image_filename)
             
@@ -303,35 +151,6 @@ def load_pdf_with_images(file_path, temp_dir_path):
         ))
     return documents
 
-def transcribe_audio(audio_data):
-    """Transcribes audio data to text using SpeechRecognition."""
-    r = sr.Recognizer()
-    try:
-        audio_file = io.BytesIO(audio_data)
-        with sr.AudioFile(audio_file) as source:
-            audio = r.record(source)
-        return r.recognize_google(audio)
-    except sr.UnknownValueError:
-        st.warning("Speech Recognition could not understand audio.")
-    except sr.RequestError as e:
-        st.error(f"Could not request results from Google Speech Recognition service; {e}")
-    return None
-
-def load_audio_and_transcribe(file_path, temp_dir_path):
-    """Loads an audio file, transcribes it, and returns a Document."""
-    with open(file_path, "rb") as f:
-        audio_data = f.read()
-    
-    text = transcribe_audio(audio_data)
-    if text:
-        return [Document(
-            page_content=text,
-            metadata={
-                'source': os.path.basename(file_path)
-            }
-        )]
-    return []
-
 # Proactive rate limiting helper
 def check_rate_limit():
     """Simple rate limiting to avoid API errors by enforcing a delay."""
@@ -350,17 +169,7 @@ def check_rate_limit():
 
 # --- STATE MANAGEMENT AND CACHING ---
 @st.cache_resource(ttl="2h")
-def configure_retriever(uploaded_files, uploaded_audio, temp_dir_path):
-    """
-    Configures the retriever by loading, splitting, and embedding documents.
-    """
-    docs = []
-    if uploaded_audio:
-        temp_filepath = os.path.join(temp_dir_path, uploaded_audio.name)
-        with open(temp_filepath, "wb") as f:
-            f.write(uploaded_audio.getvalue())
-        docs.extend(load_audio_and_transcribe(temp_filepath, temp_dir_path))
-
+def configure_retriever(uploaded_files, temp_dir_path):
     """
     Configures the retriever by loading, splitting, and embedding documents.
     """
@@ -375,13 +184,16 @@ def configure_retriever(uploaded_files, uploaded_audio, temp_dir_path):
             if file_extension == '.pdf':
                 loaded_docs = load_pdf_with_images(temp_filepath, temp_dir_path)
             elif file_extension == '.docx':
-                loaded_docs = load_docx_with_images(temp_filepath, temp_dir_path)
-            elif file_extension == '.pptx':
-                loaded_docs = load_pptx_with_images(temp_filepath, temp_dir_path)
-            elif file_extension == '.html':
-                loaded_docs = load_html_with_images(temp_filepath, temp_dir_path)
+                loader = Docx2txtLoader(temp_filepath)
+                loaded_docs = loader.load()
             elif file_extension == '.txt':
                 loader = TextLoader(temp_filepath)
+                loaded_docs = loader.load()
+            elif file_extension == '.html':
+                loader = UnstructuredHTMLLoader(temp_filepath)
+                loaded_docs = loader.load()
+            elif file_extension == '.pptx':
+                loader = UnstructuredPowerPointLoader(temp_filepath)
                 loaded_docs = loader.load()
             elif file_extension == '.csv':
                 loader = CSVLoader(temp_filepath)
@@ -496,21 +308,6 @@ with st.sidebar:
         type=["pdf", "docx", "txt", "html", "pptx", "csv"],
         accept_multiple_files=True
     )
-
-    st.header("🎤 Audio Input")
-    audio_bytes = mic_recorder(
-        start_prompt="Start recording",
-        stop_prompt="Stop recording",
-        just_once=True,
-        use_container_width=True,
-        key="mic_recorder"
-    )
-
-    uploaded_audio = st.file_uploader(
-        label="Upload Audio File (WAV, MP3)",
-        type=["wav", "mp3"],
-        accept_multiple_files=False
-    )
     
     if st.button("🗑️ Clear Conversation & Files"):
         st.session_state.langchain_messages = []
@@ -534,19 +331,11 @@ if not uploaded_files:
     st.info("Please upload your documents in the sidebar to start chatting.")
     st.stop()
 
-retriever = configure_retriever(uploaded_files, uploaded_audio, st.session_state.temp_dir)
+retriever = configure_retriever(uploaded_files, st.session_state.temp_dir)
 if not retriever:
     st.stop()
 
 msgs = StreamlitChatMessageHistory(key="langchain_messages")
-
-# Handle microphone input
-if audio_bytes:
-    user_prompt = transcribe_audio(audio_bytes)
-    if user_prompt:
-        st.chat_message("user").write(user_prompt)
-    else:
-        user_prompt = None
 
 conversational_qa_template = """You are an expert research assistant with advanced analytical capabilities. Your goal is to provide clear, accurate, and insightful answers based on the provided context.
 
@@ -556,12 +345,12 @@ conversational_qa_template = """You are an expert research assistant with advanc
 3.  **Markdown Formatting:** Structure your response with appropriate markdown (headers, bold, lists) for readability. If the data is tabular, present it as a clear Markdown table.
 
 **Visualization Instructions:**
-- **When to Generate Charts:** If the user asks for a chart, graph, or visual analysis, and you can identify relevant data (from tables or text), you MUST generate one or more charts.
+- **When to Generate Charts:** If the user asks for a chart, graph, or visual analysis, and you can identify relevant data (from tables or text), you MUST generate a chart.
 - **How to Generate Charts:**
-    - Generate a **separate, self-contained HTML file** for each chart.
-    - Use **Chart.js** (from `https://cdn.jsdelivr.net/npm/chart.js`) for creating the charts. This is the only library supported.
-    - Each HTML code block MUST be enclosed in its own markdown block: ```html ... ```
-    - **Example HTML Structure for each chart:**
+    - Generate a **single, self-contained HTML file** for the chart.
+    - Use **Chart.js** (from `https://cdn.jsdelivr.net/npm/chart.js`) for creating the chart. This is the only library supported.
+    - Your HTML code MUST be enclosed in a markdown block: ```html ... ```
+    - **Example HTML Structure:**
       ```html
       <!DOCTYPE html>
       <html>
@@ -570,12 +359,12 @@ conversational_qa_template = """You are an expert research assistant with advanc
         <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
       </head>
       <body>
-        <div style="width: 90%; height: 550px; margin: auto;">
-          <canvas id="myChart1"></canvas>
+        <div style="width: 90%; margin: auto;">
+          <canvas id="myChart"></canvas>
         </div>
         <script>
-          const ctx1 = document.getElementById('myChart1').getContext('2d');
-          new Chart(ctx1, {{
+          const ctx = document.getElementById('myChart').getContext('2d');
+          new Chart(ctx, {{
             type: 'bar', // or 'line', 'pie', etc.
             data: {{
               labels: ['Label 1', 'Label 2', 'Label 3'],
@@ -802,6 +591,5 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                     
                     msgs.add_user_message(user_prompt)
                     msgs.add_ai_message(full_response)
-
 
 
