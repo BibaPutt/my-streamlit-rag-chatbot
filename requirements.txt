@@ -3,6 +3,7 @@ langchain-google-genai
 langchain
 langchain-community
 google-generativeai
+pysqlite3-binary
 pymupdf
 chromadb
 pandas
@@ -11,12 +12,16 @@ unstructured
 beautifulsoup4
 lxml
 Pillow
-pysqlite3-binary 
+
 python-pptx
 pytesseract
 pdfminer
 sentence-transformers
 torch
 transformers
-
+python-docx
+requests
+streamlit-mic-recorder
+SpeechRecognition
+pyaudio
 
