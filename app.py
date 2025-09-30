@@ -40,7 +40,7 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 
 # Other libraries
 from chromadb.config import Settings
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
+from google.genai.types import HarmCategory, HarmBlockThreshold
 
 try:
     import docx
@@ -802,5 +802,6 @@ if user_prompt := st.chat_input("Ask a question about your documents..."):
                     
                     msgs.add_user_message(user_prompt)
                     msgs.add_ai_message(full_response)
+
 
 
