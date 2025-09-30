@@ -1,4 +1,3 @@
 poppler-utils
 tesseract-ocr
 libgl1-mesa-glx
-portaudio19-dev
